@@ -65,43 +65,43 @@ impl SolanaIntegration {
         Ok(keypair)
     }
 
-    /// Submits crawl data to the blockchain (simplified for PoC)
-    pub fn submit_crawl_data(&self, domain: &str, pages_count: usize, total_data_size: usize) -> Result<String> {
-        info!("Submitting crawl data to Solana blockchain: {} pages from {}", pages_count, domain);
-        
-        // For this PoC, we'll just simulate sending a transaction with data
-        // In a real implementation, this would call a program with the crawl data
+    /// Submit verification result to the blockchain
+    pub fn submit_verification_result(&self, task_id: &str, client_id: &str, is_verified: bool, score: f64) -> Result<String> {
+        info!("Submitting verification result for task {}: client={}, verified={}, score={}", 
+              task_id, client_id, is_verified, score);
+              
+        // For this implementation, we'll simulate the transaction
+        // In a real implementation, we would create a proper transaction
         
         // Check if the blockchain is available
         let version = self.client.get_version()?;
         info!("Connected to Solana {} (feature set: {:?})", version.solana_core, version.feature_set);
         
-        // In a real implementation, we would:
-        // 1. Create a transaction with instruction to our program
-        // 2. Sign and send the transaction
-        // 3. Return the transaction signature
+        // Simulate a transaction hash
+        let simulated_tx_hash = format!("verify_tx_{}_{}_{}_{}", 
+                                         task_id, 
+                                         client_id.replace(":", "_"), 
+                                         if is_verified { "verified" } else { "rejected" }, 
+                                         (score * 100.0) as u32);
         
-        // For the PoC, we'll just simulate a transaction hash
-        let simulated_tx_hash = format!("sim_tx_{}_{}_{}", domain.replace(".", "_"), pages_count, total_data_size);
-        
-        info!("Simulated transaction hash: {}", simulated_tx_hash);
+        info!("Simulated verification transaction hash: {}", simulated_tx_hash);
         Ok(simulated_tx_hash)
     }
     
-    /// Claims incentives for completed crawl (simplified for PoC)
-    pub fn claim_incentives(&self, tx_hash: &str) -> Result<u64> {
-        info!("Claiming incentives for crawl transaction: {}", tx_hash);
+    /// Transfer incentives to a client
+    pub fn transfer_incentives(&self, client_id: &str, amount: u64) -> Result<String> {
+        info!("Transferring {} tokens to client {}", amount, client_id);
         
-        // In a real implementation, this would:
-        // 1. Call the program to claim incentives
-        // 2. Return the amount of tokens received
+        // For this implementation, we'll simulate the transaction
+        // In a real implementation, we would transfer SOL to the client's wallet
         
-        // For this PoC, we'll simulate a calculation of incentives
-        // based on the transaction hash content
-        let simulated_incentive = tx_hash.len() as u64 * 1_000_000; // Example calculation
+        // Simulate a transaction hash
+        let simulated_tx_hash = format!("incentive_tx_{}_{}",
+                                         client_id.replace(":", "_"),
+                                         amount);
         
-        info!("Simulated incentives claimed: {} tokens", simulated_incentive);
-        Ok(simulated_incentive)
+        info!("Simulated incentive transaction hash: {}", simulated_tx_hash);
+        Ok(simulated_tx_hash)
     }
     
     /// Airdrop SOL to the wallet (useful for testing on devnet)
