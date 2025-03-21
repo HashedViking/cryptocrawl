@@ -7,8 +7,21 @@ use serde_json;
 use log::info;
 
 /// Manages the database for the manager
+#[derive(Debug)]
 pub struct Database {
     conn: Connection,
+    path: PathBuf,
+}
+
+impl Clone for Database {
+    fn clone(&self) -> Self {
+        // Open a new connection to the same database
+        let conn = Connection::open(&self.path).expect("Failed to clone database connection");
+        Self {
+            conn,
+            path: self.path.clone(),
+        }
+    }
 }
 
 impl Database {
@@ -20,29 +33,24 @@ impl Database {
         // Log the database location
         info!("Opening database at {:?}", path);
         
-        // Check if the parent directory exists, if not create it
+        // Ensure the directory exists
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                info!("Creating directory: {:?}", parent);
-                fs::create_dir_all(parent)
-                    .context(format!("Failed to create directory {:?}", parent))?;
+                fs::create_dir_all(parent)?;
             }
         }
         
-        // Check if the database file exists
-        let db_exists = path.exists();
+        // Connect to database
+        let conn = Connection::open(path)?;
         
-        // Connect to the database
-        let conn = Connection::open(path)
-            .context(format!("Failed to open database at {:?}", path))?;
+        // Create instance
+        let mut db = Self { 
+            conn,
+            path: path.to_path_buf(),
+        };
         
-        // Create a new instance
-        let mut db = Database { conn };
-        
-        // Initialize the database if it's new
-        if !db_exists {
-            db.init_database()?;
-        }
+        // Initialize tables
+        db.init_database()?;
         
         Ok(db)
     }

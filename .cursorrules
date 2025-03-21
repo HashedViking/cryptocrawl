@@ -18,3 +18,4 @@
 * Never commit to git yourself until I ask explicitly
 * Use our extract_api_docs that uses daipendency to extract narrative and API documentation from a library and output it in an LLM-friendly format
 * Use cargo fix before applying your own fixes
+* Dont use && in the terminal, use ; to run multiple commands

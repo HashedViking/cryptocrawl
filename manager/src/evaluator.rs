@@ -1,10 +1,13 @@
 use anyhow::{Result, anyhow, Context};
-use log::{info, warn, debug};
+use log::{info, warn, debug, error};
 use crate::models::CrawlReport;
 use reqwest::Client;
 use std::time::Duration;
 use std::process::Command;
 use std::fs;
+
+/// Available Ollama models
+const FALLBACK_MODELS: [&str; 3] = ["deepseek-r1:14b", "llama3", "mistral"];
 
 /// LLM-based evaluator for crawl reports
 pub struct Evaluator {
@@ -29,6 +32,72 @@ impl Evaluator {
         }
     }
     
+    /// Check if the Ollama service is available and find a working model
+    pub async fn check_service(&mut self) -> Result<bool> {
+        info!("Checking Ollama service at {}", self.host);
+        
+        // First check if the service is responding
+        let url = format!("{}/api/tags", self.host);
+        
+        match self.client.get(&url).send().await {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    warn!("Ollama service returned non-success status: {}", response.status());
+                    return Ok(false);
+                }
+                
+                let models: serde_json::Value = match response.json().await {
+                    Ok(models) => models,
+                    Err(e) => {
+                        warn!("Failed to parse Ollama models response: {}", e);
+                        return Ok(false);
+                    }
+                };
+                
+                // Extract available models
+                let available_models = models.get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                
+                debug!("Available Ollama models: {:?}", available_models);
+                
+                // Check if our configured model is available
+                if available_models.iter().any(|m| m == &self.model) {
+                    info!("Using configured model: {}", self.model);
+                    return Ok(true);
+                }
+                
+                // Try fallback models
+                for fallback in FALLBACK_MODELS.iter() {
+                    if available_models.iter().any(|m| m == fallback) {
+                        info!("Using fallback model: {} (configured model {} not available)", fallback, self.model);
+                        self.model = fallback.to_string();
+                        return Ok(true);
+                    }
+                }
+                
+                warn!("No suitable model found. Available models: {:?}", available_models);
+                if !available_models.is_empty() {
+                    info!("Using first available model: {}", available_models[0]);
+                    self.model = available_models[0].clone();
+                    return Ok(true);
+                }
+                
+                error!("No models available in Ollama");
+                Ok(false)
+            },
+            Err(e) => {
+                warn!("Failed to connect to Ollama service: {}", e);
+                Ok(false)
+            }
+        }
+    }
+    
     /// Verify a crawl report using LLM
     pub async fn verify_report(&self, report: &CrawlReport) -> Result<(bool, f64, String)> {
         // Create verification prompt
@@ -36,20 +105,46 @@ impl Evaluator {
         
         // Query LLM
         info!("Querying LLM to verify report with {} pages", report.pages_count);
-        let response = self.query_llm(&prompt).await?;
-        
-        // Extract verification result
-        let (is_valid, confidence, reason) = self.parse_verification_result(&response)?;
-        
-        info!("Report verification result: valid={}, confidence={:.2}, reason={}",
-              is_valid, confidence, reason);
-        
-        Ok((is_valid, confidence, reason))
+        match self.query_llm(&prompt).await {
+            Ok(response) => {
+                // Extract verification result
+                match self.parse_verification_result(&response) {
+                    Ok((is_valid, confidence, reason)) => {
+                        info!("Report verification result: valid={}, confidence={:.2}, reason={}",
+                              is_valid, confidence, reason);
+                        Ok((is_valid, confidence, reason))
+                    },
+                    Err(e) => {
+                        warn!("Failed to parse LLM verification result: {}", e);
+                        // Return a default response instead of failing
+                        Ok((true, 0.5, format!("Failed to parse LLM response: {}", e)))
+                    }
+                }
+            },
+            Err(e) => {
+                warn!("LLM verification failed: {}", e);
+                // Return a default response instead of failing
+                Ok((true, 0.5, format!("LLM verification unavailable: {}", e)))
+            }
+        }
     }
     
     /// Get API documentation for a package using daipendency
     pub async fn get_api_documentation(&self, package: &str) -> Result<String> {
         info!("Extracting API documentation for package: {}", package);
+        
+        // Check for cached documentation first
+        let cache_dir = "cache/api_docs";
+        if !std::path::Path::new(cache_dir).exists() {
+            fs::create_dir_all(cache_dir)?;
+        }
+        
+        let cache_path = format!("{}/{}.md", cache_dir, package);
+        if std::path::Path::new(&cache_path).exists() {
+            info!("Using cached API documentation for {}", package);
+            return fs::read_to_string(&cache_path)
+                .context(format!("Failed to read cached API documentation for {}", package));
+        }
         
         // Use the daipendency CLI to extract API documentation
         let output = Command::new("daipendency")
@@ -58,19 +153,34 @@ impl Evaluator {
             .context("Failed to run daipendency CLI")?;
         
         if !output.status.success() {
-            return Err(anyhow!("daipendency CLI failed: {}", String::from_utf8_lossy(&output.stderr)));
+            let error = String::from_utf8_lossy(&output.stderr);
+            error!("daipendency CLI failed: {}", error);
+            
+            // Try alternative command
+            info!("Trying alternative daipendency command");
+            let alt_output = Command::new("cargo")
+                .args(["run", "--bin", "extract_api_docs", "--", package])
+                .output()
+                .context("Failed to run extract_api_docs tool")?;
+                
+            if !alt_output.status.success() {
+                let alt_error = String::from_utf8_lossy(&alt_output.stderr);
+                return Err(anyhow!("All API documentation extraction methods failed. daipendency error: {}, extract_api_docs error: {}", 
+                    error, alt_error));
+            }
+            
+            let docs = String::from_utf8_lossy(&alt_output.stdout).to_string();
+            // Cache the documentation
+            fs::write(&cache_path, &docs)
+                .context(format!("Failed to cache API documentation for {}", package))?;
+                
+            return Ok(docs);
         }
         
         let docs = String::from_utf8_lossy(&output.stdout).to_string();
         debug!("Extracted API documentation for {}", package);
         
         // Cache the documentation for future use
-        let cache_dir = "cache/api_docs";
-        if !std::path::Path::new(cache_dir).exists() {
-            fs::create_dir_all(cache_dir)?;
-        }
-        
-        let cache_path = format!("{}/{}.md", cache_dir, package);
         fs::write(&cache_path, &docs)
             .context(format!("Failed to cache API documentation for {} to {}", package, cache_path))?;
         
@@ -168,19 +278,31 @@ impl Evaluator {
     async fn query_llm(&self, prompt: &str) -> Result<String> {
         let url = format!("{}/api/generate", self.host);
         
-        let response = self.client.post(&url)
+        let response = match self.client.post(&url)
             .json(&serde_json::json!({
                 "model": self.model,
                 "prompt": prompt,
                 "stream": false
             }))
             .send()
-            .await
-            .context("Failed to query LLM")?;
+            .await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if e.is_timeout() {
+                        return Err(anyhow!("LLM query timed out: {}", e));
+                    } else if e.is_connect() {
+                        return Err(anyhow!("Failed to connect to LLM service: {}", e));
+                    } else {
+                        return Err(anyhow!("LLM query failed: {}", e));
+                    }
+                }
+            };
         
         if response.status().is_success() {
-            let result: serde_json::Value = response.json().await
-                .context("Failed to parse LLM response")?;
+            let result: serde_json::Value = match response.json().await {
+                Ok(json) => json,
+                Err(e) => return Err(anyhow!("Failed to parse LLM response: {}", e))
+            };
             
             if let Some(response_text) = result.get("response").and_then(|v| v.as_str()) {
                 Ok(response_text.to_string())

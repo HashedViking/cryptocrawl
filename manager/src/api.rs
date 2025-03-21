@@ -118,15 +118,15 @@ pub struct ApiDocResponse {
 
 // API implementation
 pub async fn start_api_server(
-    db: Database,
-    evaluator: Evaluator,
+    db: Arc<Database>,
+    evaluator: Arc<Evaluator>,
     solana: SolanaIntegration,
     addr: &str,
 ) -> Result<(), anyhow::Error> {
     // Create shared state
     let state = Arc::new(AppState {
-        db: Arc::new(Mutex::new(db)),
-        evaluator: Arc::new(evaluator),
+        db: Arc::new(Mutex::new(db.as_ref().clone())),
+        evaluator: evaluator.clone(),
         solana: Arc::new(solana),
         running: Arc::new(AtomicBool::new(true)),
     });
@@ -139,11 +139,13 @@ pub async fn start_api_server(
 
     // Build router
     let app = Router::new()
+        .route("/api/tasks/assign", post(assign_next_task))
         .route("/api/tasks", get(get_all_tasks).post(create_task))
         .route("/api/tasks/:id", get(get_task))
         .route("/api/tasks/:id/assign", post(assign_task))
         .route("/api/reports", post(submit_report))
         .route("/api/reports/:task_id", get(get_report))
+        .route("/api/crawlers/register", post(register_crawler))
         .route("/api/docs/:package", get(get_api_docs))
         .route("/api/health", get(health_check))
         .layer(cors)
@@ -290,6 +292,43 @@ async fn assign_task(
     Ok(Json(task_response))
 }
 
+/// Assign the next available task
+async fn assign_next_task(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TaskAssignmentRequest>,
+) -> Result<Json<TaskResponse>, ApiError> {
+    let db = state.db.lock().await;
+    
+    // Get all pending tasks
+    let tasks = db.get_pending_tasks()?;
+    
+    // Find the first available task
+    let mut task = match tasks.into_iter().next() {
+        Some(task) => task,
+        None => return Err(ApiError::NotFound("No tasks available for assignment".to_string())),
+    };
+    
+    // Assign the task
+    task.assign(req.client_id.clone());
+    
+    // Update in database
+    db.update_task(&task)?;
+    
+    // Create response
+    let task_response = TaskResponse {
+        id: task.id,
+        target_url: task.target_url,
+        max_depth: task.max_depth,
+        follow_subdomains: task.follow_subdomains,
+        max_links: task.max_links,
+        created_at: task.created_at,
+        status: format!("{:?}", task.status),
+        incentive_amount: task.incentive_amount,
+    };
+    
+    Ok(Json(task_response))
+}
+
 async fn submit_report(
     State(state): State<Arc<AppState>>,
     Json(submission): Json<CrawlReportSubmission>,
@@ -392,4 +431,20 @@ async fn get_api_docs(
     };
     
     Ok(Json(response))
+}
+
+/// Handle crawler registration
+async fn register_crawler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, ApiError> {
+    let client_id = request.get("client_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("Missing client_id".to_string()))?;
+    
+    // In a real implementation, we'd store the crawler in the database
+    // For now, we'll just log it
+    info!("Registered crawler with client ID: {}", client_id);
+    
+    Ok(StatusCode::OK)
 } 

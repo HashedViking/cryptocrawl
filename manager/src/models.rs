@@ -136,4 +136,76 @@ pub struct CrawlReport {
     pub verification_score: Option<f64>,
     /// LLM verification notes
     pub verification_notes: Option<String>,
+}
+
+/// Configuration for the manager
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// Server configuration
+    pub server: ServerConfig,
+    /// Database configuration
+    pub database: DatabaseConfig,
+    /// Solana configuration
+    pub solana: SolanaConfig,
+    /// Evaluator configuration
+    pub evaluator: EvaluatorConfig,
+}
+
+/// Server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Host to bind to
+    pub host: String,
+    /// Port to bind to
+    pub port: u16,
+}
+
+/// Database configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseConfig {
+    /// Database path
+    pub path: String,
+}
+
+/// Solana configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolanaConfig {
+    /// RPC endpoint
+    pub rpc_endpoint: String,
+    /// Keypair path
+    pub keypair_path: String,
+    /// Program ID
+    pub program_id: String,
+}
+
+/// Evaluator configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvaluatorConfig {
+    /// Ollama host
+    pub host: String,
+    /// Model to use
+    pub model: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8000,
+            },
+            database: DatabaseConfig {
+                path: "data/cryptocrawl.db".to_string(),
+            },
+            solana: SolanaConfig {
+                rpc_endpoint: "https://api.devnet.solana.com".to_string(),
+                keypair_path: "data/keypair.json".to_string(),
+                program_id: "CrawL4Lvdx5hGZ9S9xABCzAvta8P9R4W7Z4BM7nKTsKw".to_string(),
+            },
+            evaluator: EvaluatorConfig {
+                host: "http://localhost:11434".to_string(),
+                model: "deepseek-r1:14b".to_string(),
+            },
+        }
+    }
 } 

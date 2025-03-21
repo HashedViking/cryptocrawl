@@ -1,0 +1,15 @@
+[server]
+host = "127.0.0.1"
+port = 8000
+
+[database]
+path = "data/cryptocrawl.db"
+
+[solana]
+rpc_endpoint = "https://api.devnet.solana.com"
+keypair_path = "data/keypair.json"
+program_id = "CrawL4Lvdx5hGZ9S9xABCzAvta8P9R4W7Z4BM7nKTsKw"
+
+[evaluator]
+host = "http://localhost:11434"
+model = "deepseek-r1:14b"

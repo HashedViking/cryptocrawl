@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use log;
 
 /// Represents a crawl task
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +57,7 @@ impl Task {
     }
 }
 
-/// Represents a crawled page
+/// Crawled page information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawledPage {
     /// URL of the page
@@ -73,10 +74,13 @@ pub struct CrawledPage {
     
     /// HTTP status code
     pub status_code: Option<u16>,
+    
+    /// HTML body content of the page
+    pub body: Option<String>,
 }
 
-/// Status of a crawl operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Status of a crawl
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CrawlStatus {
     /// Crawl is in progress
     InProgress,
@@ -97,7 +101,7 @@ pub enum CrawlStatus {
 impl fmt::Display for CrawlStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CrawlStatus::InProgress => write!(f, "InProgress"),
+            CrawlStatus::InProgress => write!(f, "In Progress"),
             CrawlStatus::Completed => write!(f, "Completed"),
             CrawlStatus::Failed => write!(f, "Failed"),
             CrawlStatus::Verified => write!(f, "Verified"),
@@ -106,7 +110,7 @@ impl fmt::Display for CrawlStatus {
     }
 }
 
-/// Represents the result of a crawl operation
+/// Result of a crawl operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlResult {
     /// Task ID of the associated task
@@ -140,7 +144,7 @@ pub struct CrawlResult {
     pub incentives_received: Option<i64>,
 }
 
-/// Represents a report that will be submitted to the manager
+/// Report of a crawl to submit to the manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlReport {
     /// Task ID of the associated task
@@ -186,14 +190,30 @@ impl CrawlResult {
     
     /// Add a crawled page to the result
     pub fn add_page(&mut self, page: CrawledPage) {
-        // Update total size
+        // Add the page to the list
+        if page.status_code.unwrap_or(0) == 200 && page.size > 0 {
+            log::info!("Added page: {} (size: {}, status: {})", 
+                  page.url, page.size, page.status_code.unwrap_or(0));
+            
+            // Get the first 100 chars of body if available for debugging
+            if let Some(body) = &page.body {
+                let preview = if body.len() > 100 { 
+                    format!("{}...", &body[0..100]) 
+                } else { 
+                    body.clone() 
+                };
+                log::debug!("Page content preview: {}", preview);
+            }
+        } else {
+            log::warn!("Added page with issues: {} (size: {}, status: {})", 
+                 page.url, page.size, page.status_code.unwrap_or(0));
+        }
+        
+        self.pages.push(page.clone());
+        
+        // Update the total size and count
         self.total_size += page.size;
-        
-        // Add page to list
-        self.pages.push(page);
-        
-        // Update page count
-        self.pages_count = self.pages.len();
+        self.pages_count += 1;
     }
     
     /// Complete the crawl

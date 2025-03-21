@@ -1,6 +1,6 @@
 use axum::{
     routing::{get, post},
-    Router, extract::{State, Path, Json, Query}, http::StatusCode,
+    Router, extract::{State, Path, Json}, http::StatusCode,
     response::{IntoResponse, Response, Html},
 };
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,7 @@ use crate::db::Database;
 use crate::models::{Task, CrawlResult, CrawlStatus};
 use crate::crawler::Crawler;
 use crate::solana::SolanaIntegration;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tower_http::cors::{CorsLayer, Any};
-use tower_http::services::ServeDir;
 use log::{info, error};
 use anyhow::Result;
 
@@ -453,13 +450,7 @@ pub async fn start_ui_server(
         running: Arc::new(AtomicBool::new(true)),
     });
 
-    // Configure CORS
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    // Build router
+    // Build router with routes and state
     let app = Router::new()
         .route("/", get(index_page))
         .route("/tasks", get(tasks_page))
@@ -468,7 +459,6 @@ pub async fn start_ui_server(
         .route("/api/wallet", get(get_wallet))
         .route("/api/status", get(get_status))
         .route("/api/health", get(health_check))
-        .layer(cors)
         .with_state(state);
 
     // Start server
@@ -550,11 +540,11 @@ async fn assign_task(
     
     // Start crawling in a background task
     let state_clone = state.clone();
-    let task_clone = task.clone();
     tokio::spawn(async move {
         let crawl_result = {
             let mut crawler = state_clone.crawler.lock().await;
-            match crawler.crawl(task_clone).await {
+            *crawler = Crawler::new(task.clone());
+            match crawler.crawl().await {
                 Ok(result) => result,
                 Err(e) => {
                     error!("Crawl failed: {}", e);
@@ -662,26 +652,24 @@ async fn get_status_data(
     // Get active task if any
     let active_task = {
         let crawler = state.crawler.lock().await;
-        if let Some(task) = crawler.current_task() {
-            if let Some(result) = crawler.current_result() {
-                Some(TaskStatus {
-                    id: task.id.clone(),
-                    url: task.target_url.clone(),
-                    status: format!("{:?}", result.status),
-                    pages_crawled: result.pages_count,
-                    data_size: result.total_size,
-                })
-            } else {
-                Some(TaskStatus {
-                    id: task.id.clone(),
-                    url: task.target_url.clone(),
-                    status: "Starting".to_string(),
-                    pages_crawled: 0,
-                    data_size: 0,
-                })
-            }
+        let task = crawler.current_task();
+        
+        if let Some(result) = crawler.current_result() {
+            Some(TaskStatus {
+                id: task.id.clone(),
+                url: task.target_url.clone(),
+                status: format!("{:?}", result.status),
+                pages_crawled: result.pages_count,
+                data_size: result.total_size,
+            })
         } else {
-            None
+            Some(TaskStatus {
+                id: task.id.clone(),
+                url: task.target_url.clone(),
+                status: "Starting".to_string(),
+                pages_crawled: 0,
+                data_size: 0,
+            })
         }
     };
     

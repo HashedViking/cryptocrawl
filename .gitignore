@@ -1,3 +1,9 @@
-/target
+**/target
 *.exe
 *.lock
+*.db
+*.json
+*.log
+*.txt
+*.yaml
+.env

@@ -1,6 +1,7 @@
 mod crawler;
 mod db;
 mod models;
+mod service;
 mod solana;
 mod ui;
 
@@ -11,11 +12,10 @@ use std::path::{PathBuf, Path};
 use std::fs;
 use crawler::Crawler;
 use db::Database;
+use service::CrawlerService;
 use solana::SolanaIntegration;
 use uuid::Uuid;
 use reqwest::Client;
-use std::time::Duration;
-use tokio::time;
 
 /// Command line arguments
 #[derive(Parser)]
@@ -34,7 +34,7 @@ struct Args {
     log_level: LevelFilter,
     
     /// Client ID (generates a new one if not provided)
-    #[clap(short, long)]
+    #[clap(short = 'i', long)]
     client_id: Option<String>,
     
     /// Solana keypair path
@@ -58,11 +58,11 @@ struct Args {
     config: Option<PathBuf>,
     
     /// Manager API endpoint
-    #[clap(short, long, default_value = "http://localhost:8000")]
+    #[clap(short = 'u', long, default_value = "http://localhost:8000")]
     manager_url: String,
     
     /// Poll interval in seconds
-    #[clap(short, long, default_value = "60")]
+    #[clap(short = 't', long, default_value = "60")]
     poll_interval: u64,
 }
 
@@ -72,12 +72,23 @@ enum Command {
     /// Start the crawler in UI mode
     Ui {
         /// Host to bind to
-        #[clap(short, long, default_value = "127.0.0.1")]
+        #[clap(short = 'H', long, default_value = "127.0.0.1")]
         host: String,
         
         /// Port to bind to
         #[clap(short, long, default_value = "3000")]
         port: u16,
+    },
+    
+    /// Start the crawler service that connects to the manager
+    Service {
+        /// Port for the UI server
+        #[clap(long, default_value = "3000")]
+        server_port: u16,
+        
+        /// Host for the UI server
+        #[clap(long, default_value = "127.0.0.1")]
+        server_host: String,
     },
     
     /// Crawl a single URL
@@ -94,8 +105,27 @@ enum Command {
         follow_subdomains: bool,
         
         /// Maximum links to follow
-        #[clap(short, long)]
+        #[clap(short = 'l', long)]
         max_links: Option<usize>,
+    },
+    
+    /// Crawl crates.io
+    CrawlCrates {
+        /// Maximum depth to crawl
+        #[clap(short, long, default_value = "2")]
+        max_depth: u32,
+        
+        /// Follow subdomains
+        #[clap(short, long)]
+        follow_subdomains: bool,
+        
+        /// Maximum links to follow
+        #[clap(short = 'l', long, default_value = "20")]
+        max_links: usize,
+        
+        /// Output file for the crawl report
+        #[clap(short, long)]
+        output: Option<PathBuf>,
     },
     
     /// Register as a crawler with the manager
@@ -236,132 +266,206 @@ async fn main() -> Result<()> {
         eprintln!("Warning: Failed to load configuration: {}", e);
     }
     
-    // Initialize logger
-    env_logger::Builder::new()
+    // Configure logger
+    env_logger::Builder::from_env(env_logger::Env::default())
         .filter_level(args.log_level)
         .init();
     
-    // Generate or use provided client ID
-    let client_id = args.client_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    info!("Using client ID: {}", client_id);
+    // Create database
+    let mut db = Database::new(&args.db_path)
+        .context(format!("Failed to create database at {:?}", args.db_path))?;
     
-    // Ensure database directory exists
-    ensure_parent_dir(&args.db_path)
-        .context("Failed to ensure database directory exists")?;
-    
-    // Initialize database
-    let db = Database::new(&args.db_path)
-        .context("Failed to initialize database")?;
-    
-    // Ensure keypair directory exists
-    let keypair_path = Path::new(&args.keypair_path);
-    ensure_parent_dir(keypair_path)
-        .context("Failed to ensure keypair directory exists")?;
-    
-    // Initialize Solana integration
-    let solana = SolanaIntegration::new(
+    // Create Solana integration
+    let mut solana = SolanaIntegration::new(
         &args.rpc_endpoint,
         Some(&args.keypair_path),
         &args.program_id,
     ).context("Failed to initialize Solana integration")?;
-    
-    // Display wallet information
-    let wallet_address = solana.get_wallet_address();
-    let balance = solana.get_balance()
-        .context("Failed to get wallet balance")?;
-    
-    info!("Wallet address: {}", wallet_address);
-    info!("Wallet balance: {} tokens", balance);
-    
-    // Store manager's public key in Solana integration
     solana.set_manager_pubkey(&args.manager_pubkey);
     
-    // Initialize HTTP client
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("Failed to create HTTP client")?;
+    // Save manager URL for later
+    let manager_url = args.manager_url.clone();
     
-    // Main crawler loop
-    loop {
-        // Fetch task from manager
-        match fetch_task(&client, &args.manager_url).await {
-            Ok(Some(task)) => {
-                // Initialize crawler and perform the crawl
-                let crawler_instance = crawler::Crawler::new(task.clone());
-                
-                match crawler_instance.crawl().await {
-                    Ok(crawl_result) => {
-                        info!("Crawl completed: {} pages crawled in {:.2?}", 
-                              crawl_result.pages_count, 
-                              std::time::Duration::from_secs_f64(
-                                  (crawl_result.end_time.unwrap_or_default() - crawl_result.start_time) as f64
-                              ));
-                        
-                        // Convert CrawlResult to CrawlReport
-                        let report_base = crawl_result.clone().to_report();
-                        
-                        // Submit crawl result to Solana blockchain
-                        match solana.submit_crawl_report(&task.id, &crawl_result).await {
-                            Ok(signature) => {
-                                // Create final crawl report with transaction signature
-                                let report = models::CrawlReport {
-                                    task_id: report_base.task_id,
-                                    pages: report_base.pages,
-                                    transaction_signature: Some(signature),
-                                    pages_crawled: report_base.pages_crawled,
-                                    total_size_bytes: report_base.total_size_bytes,
-                                    crawl_duration_ms: report_base.crawl_duration_ms,
-                                };
-                                
-                                // Submit report to manager
-                                if let Err(e) = submit_crawl_report(&client, &args.manager_url, &task.id, &report).await {
-                                    error!("Failed to submit report to manager: {}", e);
-                                }
-                                
-                                // Save report to local database
-                                if let Err(e) = db.save_crawl_report(&report) {
-                                    error!("Failed to save crawl report to database: {}", e);
-                                }
-                            },
-                            Err(e) => {
-                                error!("Failed to submit crawl report to blockchain: {}", e);
-                                
-                                // Submit report to manager without transaction signature
-                                let report = models::CrawlReport {
-                                    task_id: report_base.task_id,
-                                    pages: report_base.pages,
-                                    transaction_signature: None,
-                                    pages_crawled: report_base.pages_crawled, 
-                                    total_size_bytes: report_base.total_size_bytes,
-                                    crawl_duration_ms: report_base.crawl_duration_ms,
-                                };
-                                
-                                if let Err(e) = submit_crawl_report(&client, &args.manager_url, &task.id, &report).await {
-                                    error!("Failed to submit report to manager: {}", e);
-                                }
-                                
-                                if let Err(e) = db.save_crawl_report(&report) {
-                                    error!("Failed to save crawl report to database: {}", e);
-                                }
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        error!("Crawl failed: {}", e);
-                    }
-                }
-            },
-            Ok(None) => {
-                info!("No tasks available, waiting for next poll interval");
-            },
-            Err(e) => {
-                error!("Error fetching task: {}", e);
-            }
-        }
+    // Execute command
+    match args.command {
+        Command::Ui { host, port } => {
+            info!("Starting crawler UI on {}:{}", host, port);
+            
+            // Create a default crawler with a dummy task for the UI
+            let dummy_task = models::Task::new(
+                "00000000-0000-0000-0000-000000000000".to_string(),
+                "http://example.com".to_string(),
+                1,
+                false,
+                Some(10),
+                0,
+            );
+            let crawler = crawler::Crawler::new(dummy_task);
+            
+            // Start the UI server
+            ui::start_ui_server(
+                db,
+                crawler,
+                solana,
+                &format!("{}:{}", host, port),
+                &args.client_id.unwrap_or_else(|| "default".to_string()),
+            ).await?;
+        },
         
-        // Wait for the next poll interval
-        info!("Waiting {} seconds before next poll", args.poll_interval);
-        time::sleep(Duration::from_secs(args.poll_interval)).await;
+        Command::Service { server_port, server_host } => {
+            info!("Starting crawler service");
+            
+            // Create crawler service
+            let service = CrawlerService::new(
+                args.client_id.clone(), 
+                db.clone(), 
+                solana.clone(), 
+                manager_url.clone(),
+                args.poll_interval
+            );
+            
+            info!("Connecting to manager at: {}", manager_url);
+            
+            // Create a default crawler with a dummy task for the UI
+            let dummy_task = models::Task::new(
+                "00000000-0000-0000-0000-000000000000".to_string(),
+                "http://example.com".to_string(),
+                1,
+                false,
+                Some(10),
+                0,
+            );
+            let crawler = crawler::Crawler::new(dummy_task);
+            
+            // Start the UI server in a separate task
+            let ui_addr = format!("{}:{}", server_host, server_port);
+            info!("Starting UI server on {}", ui_addr);
+            
+            // Start UI server in a separate task
+            let client_id = args.client_id.clone().unwrap_or_else(|| "default".to_string());
+            let ui_db = db.clone();
+            let ui_solana = solana.clone();
+            
+            tokio::spawn(async move {
+                if let Err(e) = ui::start_ui_server(
+                    ui_db,
+                    crawler,
+                    ui_solana,
+                    &ui_addr,
+                    &client_id,
+                ).await {
+                    error!("UI server error: {}", e);
+                }
+            });
+            
+            // Run service in the main task
+            service.run().await?;
+        },
+        
+        Command::Crawl { url, max_depth, follow_subdomains, max_links } => {
+            info!("Crawling {} with depth {}", url, max_depth);
+            
+            // Create a unique task ID for this crawl
+            let task_id = Uuid::new_v4().to_string();
+            
+            // Create task
+            let task = models::Task::new(
+                task_id,
+                url,
+                max_depth,
+                follow_subdomains,
+                max_links,
+                0,  // No incentive amount for direct crawls
+            );
+            
+            // Save task to database
+            db.save_task(&task)?;
+            
+            // Create crawler and crawl the URL
+            let crawler = Crawler::new(task);
+            let result = crawler.crawl().await?;
+            
+            // Print summary
+            println!("Crawl completed!");
+            println!("Pages crawled: {}", result.pages_count);
+            println!("Total size: {} bytes", result.total_size);
+            
+            // Save result to database
+            db.save_crawl_result(&result)?;
+            
+            info!("Crawl result saved to database");
+        },
+        
+        Command::CrawlCrates { max_depth, follow_subdomains, max_links, output } => {
+            info!("Crawling crates.io with depth {}", max_depth);
+            
+            // Create a task for crawling crates.io
+            let task_id = Uuid::new_v4().to_string();
+            
+            // Create task
+            let task = models::Task::new(
+                task_id,
+                "https://crates.io/".to_string(),
+                max_depth,
+                follow_subdomains,
+                Some(max_links),
+                0,  // No incentive amount for direct crawls
+            );
+            
+            // Create crawler and crawl crates.io
+            let crawler = Crawler::new(task);
+            let result = crawler.crawl().await?;
+            
+            // Print summary
+            println!("Crawl completed!");
+            println!("Pages crawled: {}", result.pages_count);
+            println!("Total size: {} bytes", result.total_size);
+            
+            // Create report
+            let report = result.to_report();
+            
+            // Save report to file if output is provided
+            if let Some(output_path) = output {
+                info!("Saving crawl report to {:?}", output_path);
+                
+                // Ensure parent directory exists
+                ensure_parent_dir(&output_path)?;
+                
+                // Serialize report to JSON
+                let json = serde_json::to_string_pretty(&report)?;
+                
+                // Write to file
+                fs::write(&output_path, json)
+                    .context(format!("Failed to write report to {:?}", output_path))?;
+                
+                println!("Report saved to {:?}", output_path);
+            }
+        },
+        
+        Command::Register => {
+            info!("Registering with manager at {}", args.manager_url);
+            
+            // Create crawler service (only for registration)
+            let service = CrawlerService::new(
+                args.client_id, 
+                db, 
+                solana, 
+                args.manager_url,
+                args.poll_interval
+            );
+            
+            // Register with the manager
+            let client_id = service.client_id();
+            if let Err(e) = service.register().await {
+                error!("Failed to register with manager: {}", e);
+                return Err(anyhow::anyhow!("Registration failed: {}", e));
+            }
+            
+            println!("Successfully registered with client ID: {}", client_id);
+        },
     }
+    
+    Ok(())
 } 
+
+// ok lets start a manager then register a crawler then let manager add a task for the crawler to crawl at @https://crates.io/  lets see how things perform, at least the manager should get the report from the crawler

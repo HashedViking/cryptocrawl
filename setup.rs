@@ -54,7 +54,7 @@ fn create_default_configs() -> Result<()> {
     "rpc_endpoint": "https://api.devnet.solana.com",
     "program_id": "CrawLY3R5pzRHE1b31TvhG8zX1CRkFxc1xECDZ97ihkUS",
     "ollama_host": "http://localhost:11434",
-    "ollama_model": "llama3",
+    "ollama_model": "mistral",
     "server": {
         "host": "127.0.0.1",
         "port": 8000

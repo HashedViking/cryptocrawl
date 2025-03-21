@@ -55,14 +55,29 @@ impl SolanaIntegration {
     /// Loads a keypair from a file
     fn load_keypair(path: &str) -> Result<Keypair> {
         let path = Path::new(path);
-        let mut file = File::open(path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
         
-        let keypair = Keypair::from_bytes(&bytes)
-            .map_err(|e| anyhow!("Failed to load keypair: {}", e))?;
-            
-        Ok(keypair)
+        // Try to load from file
+        match File::open(path) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                if let Err(e) = file.read_to_end(&mut bytes) {
+                    info!("Could not read keypair file: {}, generating a new one", e);
+                    return Ok(Keypair::new());
+                }
+                
+                match Keypair::from_bytes(&bytes) {
+                    Ok(keypair) => Ok(keypair),
+                    Err(e) => {
+                        info!("Invalid keypair format: {}, generating a new one", e);
+                        Ok(Keypair::new())
+                    }
+                }
+            },
+            Err(e) => {
+                info!("Could not open keypair file at {}: {}, generating a new one", path.display(), e);
+                Ok(Keypair::new())
+            }
+        }
     }
 
     /// Submit verification result to the blockchain

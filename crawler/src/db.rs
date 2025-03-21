@@ -1,8 +1,7 @@
 use crate::models::{Task, CrawlResult, CrawledPage, CrawlStatus, CrawlReport};
-use anyhow::{Result, Context, anyhow};
-use rusqlite::{params, Connection, OptionalExtension};
-use log::{info, warn, error, debug};
-use serde_json::Value;
+use anyhow::{Result, Context};
+use rusqlite::{params, Connection, OptionalExtension, types::Type};
+use log::{info, warn};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use std::fs;
@@ -12,13 +11,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Database {
     /// SQLite connection
     conn: Connection,
+    /// Database path
+    path: PathBuf,
+}
+
+impl Clone for Database {
+    fn clone(&self) -> Self {
+        // Open a new connection to the same database
+        let conn = Connection::open(&self.path)
+            .expect("Failed to clone database connection");
+        
+        Self {
+            conn,
+            path: self.path.clone(),
+        }
+    }
 }
 
 impl Database {
     /// Create a new database instance from a path
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         // Get the path
-        let path = db_path.as_ref();
+        let path = db_path.as_ref().to_path_buf();
         
         // Log the database location
         info!("Opening database at {:?}", path);
@@ -32,11 +46,11 @@ impl Database {
         }
         
         // Connect to database
-        let conn = Connection::open(path)
+        let conn = Connection::open(&path)
             .with_context(|| format!("Failed to open database at {:?}", path))?;
         
         // Create new database instance
-        let mut db = Self { conn };
+        let mut db = Self { conn, path };
         
         // Initialize database
         db.init()?;
@@ -262,7 +276,7 @@ impl Database {
                     "Failed" => CrawlStatus::Failed,
                     "Verified" => CrawlStatus::Verified,
                     "Rejected" => CrawlStatus::Rejected,
-                    _ => return Err(rusqlite::Error::InvalidColumnType(2, "Invalid crawl status".to_string())),
+                    _ => return Err(rusqlite::Error::InvalidColumnType(2, "Invalid crawl status".to_string(), Type::Integer)),
                 };
                 
                 // Parse pages
@@ -304,7 +318,7 @@ impl Database {
                 "Failed" => CrawlStatus::Failed,
                 "Verified" => CrawlStatus::Verified,
                 "Rejected" => CrawlStatus::Rejected,
-                _ => return Err(rusqlite::Error::InvalidColumnType(2, "Invalid crawl status".to_string())),
+                _ => return Err(rusqlite::Error::InvalidColumnType(2, "Invalid crawl status".to_string(), Type::Integer)),
             };
             
             // Parse pages
@@ -393,7 +407,7 @@ impl Database {
     }
     
     /// Save a crawl report to the database
-    pub fn save_crawl_report(&self, report: &CrawlReport) -> Result<()> {
+    pub fn save_crawl_report(&mut self, report: &CrawlReport) -> Result<()> {
         // Get current timestamp
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -1,6 +1,5 @@
-use anyhow::{Result, anyhow};
-use log::{info, warn, error};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use log::info;
 use std::path::Path;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +7,7 @@ use rand::Rng;
 use crate::models::CrawlResult;
 
 /// Represents the integration with the Solana blockchain
+#[derive(Clone)]
 pub struct SolanaIntegration {
     /// Wallet keypair path
     keypair_path: String,
