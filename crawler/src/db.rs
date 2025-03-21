@@ -131,9 +131,12 @@ impl Database {
     
     /// Save a task to the database
     pub fn save_task(&mut self, task: &Task) -> Result<()> {
+        info!("Saving task {} to database", task.id);
+        
+        // Insert task into database
         self.conn.execute(
-            "INSERT INTO tasks (
-                id, target_url, max_depth, follow_subdomains, max_links, 
+            "INSERT OR REPLACE INTO tasks (
+                id, target_url, max_depth, follow_subdomains, max_links,
                 created_at, assigned_at, incentive_amount
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
@@ -146,7 +149,7 @@ impl Database {
                 task.assigned_at,
                 task.incentive_amount,
             ],
-        )?;
+        ).with_context(|| format!("Failed to save task with ID: {}", task.id))?;
         
         Ok(())
     }

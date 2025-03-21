@@ -8,7 +8,6 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 use std::sync::Arc;
 
 /// Service to integrate crawler with the crypto manager
@@ -35,37 +34,48 @@ pub struct CrawlerService {
 impl CrawlerService {
     /// Create a new crawler service
     pub fn new(
-        client_id: Option<String>,
+        client_id: String,
+        manager_url: &str,
+        poll_interval: u64,
         db: Database,
         solana: SolanaIntegration,
-        manager_url: String,
-        poll_interval: u64,
-    ) -> Self {
-        let client_id = client_id.unwrap_or_else(|| {
-            let id = Uuid::new_v4().to_string();
-            info!("Generated new client ID: {}", id);
-            id
-        });
-        
-        // Create HTTP client with timeout
+    ) -> Result<Self> {
+        // Create HTTP client
         let client = Client::builder()
+            .user_agent("CryptoCrawl-Service/0.1")
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("Failed to build HTTP client");
+            .context("Failed to create HTTP client")?;
+            
+        // Wrap database and solana in Arc+Mutex for thread safety
+        let db = Arc::new(Mutex::new(db));
+        let solana = Arc::new(solana);
         
-        Self {
+        Ok(Self {
             client_id,
             client,
-            db: Arc::new(Mutex::new(db)),
-            solana: Arc::new(solana),
-            manager_url,
+            db,
+            solana,
+            manager_url: manager_url.to_string(),
             poll_interval,
-        }
+        })
     }
     
     /// Get the client ID
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+    
+    /// Start the crawler service
+    pub async fn start(&self) -> Result<()> {
+        info!("Starting CryptoCrawl crawler service with client ID: {}", self.client_id);
+        info!("Connected to manager at: {}", self.manager_url);
+        
+        // Register with the manager
+        self.register().await?;
+        
+        // Run the service
+        self.run().await
     }
     
     /// Start the crawler service loop
@@ -117,11 +127,12 @@ impl CrawlerService {
         drop(db); // Release the lock before the long-running crawl
         
         // Create crawler instance
+        let task_clone = task.clone();
         let crawler = Crawler::new(task);
         
         // Execute the crawl
-        info!("Starting crawl for task {}", crawler.current_task().id);
-        let crawl_result = match crawler.crawl().await {
+        info!("Starting crawl for task {}", crawler.current_task().unwrap().id);
+        let crawl_result = match crawler.crawl(&task_clone).await {
             Ok(result) => result,
             Err(e) => {
                 error!("Crawl failed: {}", e);
@@ -370,6 +381,35 @@ impl CrawlerService {
             
             error!("Error fetching tasks: {} - {}", status, error_text);
             Err(anyhow!("Error fetching tasks: {} - {}", status, error_text))
+        }
+    }
+    
+    /// Process tasks using the provided crawler
+    pub async fn process_tasks(&self, _crawler: Crawler) -> Result<()> {
+        info!("Starting crawler service with client ID {}", self.client_id);
+        info!("Connecting to manager at {}", self.manager_url);
+        
+        // Register with the manager
+        self.register().await?;
+        
+        // Start the main service loop
+        loop {
+            match self.process_next_task().await {
+                Ok(true) => {
+                    // Successfully processed a task, continue immediately
+                    continue;
+                }
+                Ok(false) => {
+                    // No task was available, wait before polling again
+                    info!("No task available, waiting for {} seconds", self.poll_interval);
+                    sleep(Duration::from_secs(self.poll_interval)).await;
+                }
+                Err(e) => {
+                    // Error occurred, log and wait before retrying
+                    error!("Error processing task: {}", e);
+                    sleep(Duration::from_secs(self.poll_interval)).await;
+                }
+            }
         }
     }
 } 

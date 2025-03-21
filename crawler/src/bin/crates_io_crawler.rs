@@ -6,11 +6,7 @@ use clap::Parser;
 use url::Url;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
-use log::{info, warn, error, debug};
-use reqwest::{Client, header};
-use std::collections::{HashSet, VecDeque};
-use std::fs::File;
-use std::io::Write;
+use log::{info, warn, debug};
 use regex::Regex;
 
 /// Command line arguments for the Crates.io crawler

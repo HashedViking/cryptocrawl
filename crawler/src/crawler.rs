@@ -1,5 +1,5 @@
 use crate::models::{CrawledPage, CrawlResult, Task};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 use log::{info, warn, debug};
 use url::Url;
 use std::collections::{HashSet, VecDeque, HashMap};
@@ -10,9 +10,26 @@ use reqwest::Client;
 /// Implementation of the web crawler
 pub struct Crawler {
     /// Current task being processed
-    current_task: Task,
+    current_task: Option<Task>,
     /// HTTP client
     client: Client,
+}
+
+impl Default for Crawler {
+    fn default() -> Self {
+        // Create a reqwest client with default settings
+        let client = Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+            .gzip(true)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+            
+        Self {
+            current_task: None,
+            client,
+        }
+    }
 }
 
 impl Crawler {
@@ -27,14 +44,19 @@ impl Crawler {
             .unwrap_or_else(|_| Client::new());
             
         Self {
-            current_task: task,
+            current_task: Some(task),
             client,
         }
     }
     
     /// Get the current task
-    pub fn current_task(&self) -> &Task {
-        &self.current_task
+    pub fn current_task(&self) -> Option<&Task> {
+        self.current_task.as_ref()
+    }
+    
+    /// Set the current task
+    pub fn set_task(&mut self, task: Task) {
+        self.current_task = Some(task);
     }
     
     /// Get the current crawl result if available
@@ -42,14 +64,12 @@ impl Crawler {
         None // This is a placeholder - in a real implementation, this would track the current result
     }
     
-    /// Crawl a URL based on the current task
-    pub async fn crawl(&self) -> Result<CrawlResult> {
-        let task = &self.current_task;
-        
+    /// Crawl a URL based on the provided task
+    pub async fn crawl(&self, task: &Task) -> Result<CrawlResult> {
         // Parse the target URL
         let target_url = &task.target_url;
         let url = Url::parse(target_url)
-            .map_err(|e| anyhow!("Invalid URL '{}': {}", target_url, e))?;
+            .with_context(|| format!("Failed to parse URL: {}", target_url))?;
         
         // Extract domain for the result
         let domain = url.host_str()
@@ -209,6 +229,14 @@ impl Crawler {
             target_url, result.pages_count, result.total_size, crawl_duration);
         
         Ok(result)
+    }
+    
+    /// Crawl a URL based on the current task (for backwards compatibility)
+    pub async fn crawl_current(&self) -> Result<CrawlResult> {
+        match &self.current_task {
+            Some(task) => self.crawl(task).await,
+            None => Err(anyhow!("No task set for crawler")),
+        }
     }
 }
 

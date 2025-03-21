@@ -4,15 +4,14 @@ mod evaluator;
 mod models;
 mod solana;
 
-use anyhow::{Result, Context, ensure};
+use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
 use log::{info, warn, error, LevelFilter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::fs;
 use db::Database;
 use evaluator::Evaluator;
 use solana::SolanaIntegration;
-use uuid::Uuid;
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
 
@@ -156,7 +155,7 @@ fn load_config() -> Result<()> {
 
 /// Initialize database
 fn init_db(args: &Args) -> Result<Database> {
-    let config = CONFIG.get().expect("Config not initialized");
+    let _config = CONFIG.get().expect("Config not initialized");
     
     // Use command line DB path if specified, otherwise use config
     let db_path = &args.db_path;
@@ -176,25 +175,25 @@ fn init_db(args: &Args) -> Result<Database> {
 /// Start the API server
 async fn start_server(db: Arc<Database>, evaluator: Arc<Evaluator>) -> Result<()> {
     // Get config values
-    let config = CONFIG.get().expect("Config not initialized");
+    let _config = CONFIG.get().expect("Config not initialized");
     
     // Create address
-    let addr = format!("{}:{}", config.server.host, config.server.port);
+    let addr = format!("{}:{}", _config.server.host, _config.server.port);
     
-    // Initialize Solana integration
+    // Start Solana integration
     let solana = SolanaIntegration::new(
-        &config.solana.rpc_endpoint,
-        Some(&config.solana.keypair_path),
-        &config.solana.program_id,
-    ).context("Failed to initialize Solana integration")?;
+        &_config.solana.rpc_endpoint,
+        Some(&_config.solana.keypair_path),
+        &_config.solana.program_id,
+    )?;
     
-    // Check if keypair is loaded
-    ensure_parent_dir(Path::new(&config.solana.keypair_path))
-        .context("Failed to ensure keypair directory exists")?;
+    // Ensure parent directory exists
+    ensure_parent_dir(Path::new(&_config.solana.keypair_path))
+        .with_context(|| "Failed to ensure parent directory exists")?;
     
     // Start API server
     info!("Starting manager server on {}", addr);
-    let server_handle = api::start_api_server(db, evaluator, solana, &addr)
+    let _server_handle = api::start_api_server(db, evaluator, solana, &addr)
         .await
         .context("Failed to start API server")?;
     
@@ -202,32 +201,15 @@ async fn start_server(db: Arc<Database>, evaluator: Arc<Evaluator>) -> Result<()
     Ok(())
 }
 
-/// Start the manager
-async fn start_manager(db: Arc<Database>, evaluator: Arc<Evaluator>) -> Result<()> {
-    // Task processing loop
-    info!("Starting task processing loop");
-    
-    // TODO: Implement task processing logic
-    // - Periodically check for new tasks
-    // - Assign tasks to available crawlers
-    // - Process completed tasks and verify reports
-    
-    // This is a placeholder for future implementation
-    loop {
-        // Sleep to avoid CPU spinning
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        
-        // Check if we need to shutdown
-        if let Ok(true) = check_shutdown_signal().await {
-            info!("Received shutdown signal, stopping manager");
-            break;
-        }
-    }
-    
+/// Start the manager process
+async fn start_manager(_db: Arc<Database>, _evaluator: Arc<Evaluator>) -> Result<()> {
+    // Implementation will be added later
+    info!("Manager process started");
     Ok(())
 }
 
 /// Check if a shutdown signal has been received
+#[allow(dead_code)]
 async fn check_shutdown_signal() -> Result<bool> {
     // TODO: Implement shutdown signal checking
     // This is a placeholder that always returns false

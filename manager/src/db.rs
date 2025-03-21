@@ -36,12 +36,14 @@ impl Database {
         // Ensure the directory exists
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create parent directory for database at {:?}", parent))?;
             }
         }
         
         // Connect to database
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open SQLite database at {:?}", path))?;
         
         // Create instance
         let mut db = Self { 
@@ -50,7 +52,8 @@ impl Database {
         };
         
         // Initialize tables
-        db.init_database()?;
+        db.init_database()
+            .context("Failed to initialize database tables")?;
         
         Ok(db)
     }
@@ -80,7 +83,7 @@ impl Database {
                 incentive_amount INTEGER NOT NULL
             )",
             [],
-        )?;
+        ).context("Failed to create tasks table")?;
         
         // Create reports table
         self.conn.execute(
@@ -100,7 +103,7 @@ impl Database {
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
             )",
             [],
-        )?;
+        ).context("Failed to create reports table")?;
         
         info!("Database tables initialized successfully");
         Ok(())

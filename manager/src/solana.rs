@@ -10,12 +10,31 @@ use std::str::FromStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::fmt;
 
 /// Represents the Solana blockchain integration for the CryptoCrawl
 pub struct SolanaIntegration {
+    /// RPC client for connecting to Solana network
     client: RpcClient,
+    
+    /// Wallet keypair used for signing transactions
+    /// Currently unused in some paths but required for future transaction signing
+    #[allow(dead_code)]
     wallet: Keypair,
+    
+    /// Program ID for the CryptoCrawl smart contract
+    /// Currently unused in some paths but required for future on-chain interactions
+    #[allow(dead_code)]
     program_id: Pubkey,
+}
+
+impl fmt::Debug for SolanaIntegration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SolanaIntegration")
+            .field("wallet", &self.wallet.pubkey())
+            .field("program_id", &self.program_id)
+            .finish()
+    }
 }
 
 impl SolanaIntegration {

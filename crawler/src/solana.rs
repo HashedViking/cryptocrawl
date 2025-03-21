@@ -6,14 +6,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::Rng;
 use crate::models::CrawlResult;
 
-/// Represents the integration with the Solana blockchain
-#[derive(Clone)]
+/// Represents a connection to the Solana blockchain
+#[derive(Debug, Clone)]
 pub struct SolanaIntegration {
     /// Wallet keypair path
+    #[allow(dead_code)]
     keypair_path: String,
     /// RPC endpoint
+    #[allow(dead_code)]
     rpc_endpoint: String,
     /// Program ID for the CryptoCrawl program
+    #[allow(dead_code)]
     program_id: String,
     /// Manager's public key (for submitting reports)
     manager_pubkey: Option<String>,

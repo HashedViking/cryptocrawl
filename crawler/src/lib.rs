@@ -5,7 +5,6 @@ pub mod ui;
 pub mod solana;
 pub mod service;
 
-use anyhow::Result;
 
 // Re-export important types
 pub use models::{Task, CrawlResult};

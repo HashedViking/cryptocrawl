@@ -544,7 +544,7 @@ async fn assign_task(
         let crawl_result = {
             let mut crawler = state_clone.crawler.lock().await;
             *crawler = Crawler::new(task.clone());
-            match crawler.crawl().await {
+            match crawler.crawl_current().await {
                 Ok(result) => result,
                 Err(e) => {
                     error!("Crawl failed: {}", e);
@@ -560,49 +560,56 @@ async fn assign_task(
             Err(e) => error!("Failed to save crawl result: {}", e),
         }
         
-        // Submit to blockchain
-        let solana = &state_clone.solana;
-        match solana.submit_crawl_data(
-            &crawl_result.task_id,
-            &crawl_result.domain,
-            crawl_result.pages_count,
-            crawl_result.total_size,
-        ) {
-            Ok(tx_hash) => {
-                info!("Submitted crawl data to blockchain: {}", tx_hash);
-                
-                // Update result with transaction hash
-                let mut result = crawl_result.clone();
-                result.set_transaction(tx_hash.clone());
-                
-                // Claim incentives
-                match solana.claim_incentives(&tx_hash) {
-                    Ok(amount) => {
-                        info!("Claimed {} tokens for crawl", amount);
-                        
-                        // Update result with incentives
-                        result.set_incentives(amount);
-                        
-                        // Update in database
-                        if let Err(e) = db.update_crawl_result(&result) {
-                            error!("Failed to update crawl result: {}", e);
+        // Update result with blockchain submission
+        let task_id = crawl_result.task_id.clone();
+        let _domain = crawl_result.domain.clone();
+        let _pages_count = crawl_result.pages_count;
+        let _total_size = crawl_result.total_size;
+
+        // Clone objects needed inside async block
+        let solana_clone = state_clone.solana.clone();
+        let db_clone = state_clone.db.clone();
+
+        // Run in a separate task to avoid blocking
+        tokio::spawn(async move {
+            // Log the transaction
+            info!("Submitting crawl data to blockchain for task {}", task_id);
+            
+            // Submit to blockchain
+            match solana_clone.submit_crawl_report(&task_id, &crawl_result).await {
+                Ok(tx_hash) => {
+                    info!("Submitted crawl data to blockchain: {}", tx_hash);
+                    
+                    // Update result with transaction hash
+                    let mut updated_result = crawl_result.clone();
+                    updated_result.set_transaction(tx_hash.clone());
+                    
+                    // Claim incentives
+                    match solana_clone.claim_incentives(&tx_hash) {
+                        Ok(amount) => {
+                            info!("Claimed {} incentive tokens", amount);
+                            
+                            // Update database - tokio's Mutex.lock() returns MutexGuard directly, not Result
+                            let mut db_guard = db_clone.lock().await;
+                            if let Err(e) = db_guard.update_crawl_result(&updated_result) {
+                                error!("Failed to update crawl result with transaction: {}", e);
+                            }
+                            
+                            if let Err(e) = db_guard.add_wallet_history(
+                                &task_id, 
+                                amount, 
+                                &tx_hash, 
+                                Some("Incentive claim")
+                            ) {
+                                error!("Failed to add wallet history entry: {}", e);
+                            }
                         }
-                        
-                        // Add to wallet history
-                        if let Err(e) = db.add_wallet_history(
-                            &result.task_id,
-                            amount,
-                            &tx_hash,
-                            Some(&format!("Incentive for crawling {}", result.domain)),
-                        ) {
-                            error!("Failed to add wallet history: {}", e);
-                        }
-                    },
-                    Err(e) => error!("Failed to claim incentives: {}", e),
+                        Err(e) => error!("Failed to claim incentives: {}", e),
+                    }
                 }
-            },
-            Err(e) => error!("Failed to submit crawl data: {}", e),
-        }
+                Err(e) => error!("Failed to submit crawl data to blockchain: {}", e),
+            }
+        });
     });
     
     // Redirect to home page
@@ -641,37 +648,41 @@ async fn get_wallet(
 async fn get_status_data(
     state: Arc<AppState>,
 ) -> Result<StatusResponse, ApiError> {
+    // Get wallet info
     let solana = &state.solana;
     let wallet_address = solana.get_wallet_address();
     let wallet_balance = solana.get_balance()?;
     
-    let db = state.db.lock().await;
-    let all_results = db.get_all_crawl_results()?;
-    let completed_tasks = all_results.len();
-    
     // Get active task if any
-    let active_task = {
-        let crawler = state.crawler.lock().await;
-        let task = crawler.current_task();
-        
-        if let Some(result) = crawler.current_result() {
+    let crawler_guard = state.crawler.lock().await;
+    let db_guard = state.db.lock().await;
+    let active_task = if let Some(task) = crawler_guard.current_task() {
+        // Check for crawl result
+        if let Ok(Some(result)) = db_guard.get_crawl_result(&task.id) {
+            // Task is in progress or completed
             Some(TaskStatus {
                 id: task.id.clone(),
                 url: task.target_url.clone(),
-                status: format!("{:?}", result.status),
+                status: result.status.to_string(),
                 pages_crawled: result.pages_count,
                 data_size: result.total_size,
             })
         } else {
+            // Task exists but no result yet
             Some(TaskStatus {
                 id: task.id.clone(),
                 url: task.target_url.clone(),
-                status: "Starting".to_string(),
+                status: "Ready".to_string(),
                 pages_crawled: 0,
                 data_size: 0,
             })
         }
+    } else {
+        None
     };
+    
+    // Get completed tasks count
+    let completed_tasks = 0; // Placeholder, would get this from the database in a real implementation
     
     Ok(StatusResponse {
         client_id: state.client_id.clone(),

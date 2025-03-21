@@ -19,3 +19,49 @@
 * Use our extract_api_docs that uses daipendency to extract narrative and API documentation from a library and output it in an LLM-friendly format
 * Use cargo fix before applying your own fixes
 * Dont use && in the terminal, use ; to run multiple commands
+* Always run `cargo check` before making changes to see existing compiler warnings/errors
+* Use `cargo fix` to automatically fix lints before manual changes
+* Pay attention to compiler suggestions for trait implementations and lifetime annotations
+* Respect Rust's ownership model - avoid suggesting solutions that violate borrowing rules
+* When suggesting Arc/Mutex/RefCell, explain the reasoning for shared ownership
+* Prefer stack allocation and references over heap allocation where possible
+* Always specify lifetime parameters when suggesting generic code
+* Use Result<T, E> for fallible operations instead of panics
+* Implement proper error types using thiserror or anyhow when appropriate
+* Add context to errors using .context() or .with_context()
+* Add unit tests for new functionality using #[test] attribute
+* Include doc tests in documentation comments (///) for API examples
+* Follow Rust doc comment conventions (///) for public APIs
+* Add #[derive(Debug)] to new structs/enums for better error messages
+* Check crates.io for version compatibility before suggesting dependencies
+* Use cargo tree to identify and resolve dependency conflicts
+* Prefer standard library solutions over external crates when possible
+* Use feature flags to minimize dependency bloat
+* Follow Rust module system conventions (mod.rs or directory/file structure)
+* Use pub(crate) instead of pub when possible to maintain encapsulation
+* Organize traits and implementations in separate modules when appropriate
+* Keep main.rs focused on application setup and configuration
+* Suggest #[inline] for small, frequently called functions
+* Use iterators instead of for loops where appropriate
+* Consider using const generics for compile-time optimizations
+* Avoid unnecessary cloning - suggest references where possible
+* Mark unsafe blocks clearly and explain safety guarantees
+* Use tokio::spawn for async tasks instead of raw threads
+* Properly handle async cancellation and cleanup
+* Use proper async traits and Future implementations
+* Add debug! and trace! macros for logging
+* Implement Display and Error traits for custom error types
+* Use dbg! macro for temporary debugging
+* Suggest cargo expand for macro-heavy code
+* Use rustfmt for consistent code formatting
+* Run clippy with all lints enabled (cargo clippy -- -W clippy::all)
+* Check for MSRV (Minimum Supported Rust Version) compatibility
+* Use cargo audit for security vulnerability checks
+* Use prepared statements for SQLite queries
+* Implement proper connection pooling
+* Handle database migrations explicitly
+* Use transactions for multi-step operations
+* Implement graceful shutdown handlers
+* Add proper error recovery for network operations
+* Include retry logic for transient failures
+* Implement proper cleanup in Drop traits

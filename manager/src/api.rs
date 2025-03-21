@@ -435,7 +435,7 @@ async fn get_api_docs(
 
 /// Handle crawler registration
 async fn register_crawler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let client_id = request.get("client_id")
