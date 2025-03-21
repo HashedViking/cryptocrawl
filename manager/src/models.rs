@@ -195,7 +195,7 @@ impl Default for Config {
                 port: 8000,
             },
             database: DatabaseConfig {
-                path: "data/cryptocrawl.db".to_string(),
+                path: "data/manager.db".to_string(),
             },
             solana: SolanaConfig {
                 rpc_endpoint: "https://api.devnet.solana.com".to_string(),

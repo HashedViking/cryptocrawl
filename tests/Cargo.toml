@@ -1,0 +1,25 @@
+[package]
+name = "cryptocrawl-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Integration tests for CryptoCrawl"
+
+[dependencies]
+tokio = { version = "1.28", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+rusqlite = { version = "0.25.0", features = ["bundled"] }
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.4", features = ["v4"] }
+url = "2.4"
+
+# For process termination on Unix systems
+[target.'cfg(unix)'.dependencies]
+nix = "0.26"
+
+[[bin]]
+name = "integration_test"
+path = "src/integration_test.rs" 

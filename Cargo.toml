@@ -2,6 +2,7 @@
 members = [
     "manager",
     "crawler",
+    "tests",
 ]
 resolver = "2"
 

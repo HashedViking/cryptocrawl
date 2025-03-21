@@ -31,7 +31,7 @@ struct Args {
     log_level: LevelFilter,
     
     /// Database path
-    #[clap(long, default_value = "data/cryptocrawl.db")]
+    #[clap(long, default_value = "data/manager.db")]
     db_path: String,
     
     /// Solana RPC endpoint

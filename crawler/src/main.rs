@@ -27,7 +27,7 @@ struct Args {
     command: Command,
     
     /// Database file path
-    #[clap(short, long, default_value = "crawler.db")]
+    #[clap(short, long, default_value = "data/crawler.db")]
     db_path: PathBuf,
     
     /// Log level
