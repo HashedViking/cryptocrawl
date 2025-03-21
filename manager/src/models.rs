@@ -129,7 +129,7 @@ pub struct CrawlReport {
     /// Start timestamp of the crawl
     pub start_time: u64,
     /// End timestamp of the crawl
-    pub end_time: u64,
+    pub end_time: Option<u64>,
     /// Whether this report has been verified
     pub verified: bool,
     /// Verification score if analyzed

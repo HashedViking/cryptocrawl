@@ -11,10 +11,10 @@ use crate::db::Database;
 use crate::models::{Task, TaskStatus, CrawlReport};
 use crate::evaluator::Evaluator;
 use crate::solana::SolanaIntegration;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tower_http::cors::{CorsLayer, Any};
-use log::{info, error};
+use log::info;
+use url::Url;
 
 /// Application state
 pub struct AppState {
@@ -152,7 +152,7 @@ pub async fn start_api_server(
     // Start server
     info!("Starting API server on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::Server::from_tcp(listener.into_std()?)?.serve(app.into_make_service()).await?;
 
     Ok(())
 }
@@ -217,7 +217,7 @@ async fn create_task(
     Json(task_req): Json<TaskRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
     // Validate URL
-    if let Err(e) = url::Url::parse(&task_req.target_url) {
+    if let Err(e) = Url::parse(&task_req.target_url) {
         return Err(ApiError::BadRequest(format!("Invalid URL: {}", e)));
     }
     
@@ -235,7 +235,7 @@ async fn create_task(
     );
     
     // Save to database
-    let mut db = state.db.lock().await;
+    let db = state.db.lock().await;
     db.create_task(&task)?;
     
     // Create response
@@ -258,7 +258,7 @@ async fn assign_task(
     Path(task_id): Path<String>,
     Json(req): Json<TaskAssignmentRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
-    let mut db = state.db.lock().await;
+    let db = state.db.lock().await;
     
     // Get the task
     let mut task = db.get_task(&task_id)?
@@ -294,27 +294,16 @@ async fn submit_report(
     State(state): State<Arc<AppState>>,
     Json(submission): Json<CrawlReportSubmission>,
 ) -> Result<Json<VerificationResult>, ApiError> {
-    let mut db = state.db.lock().await;
-    
-    // Get the task
+    // Get task
+    let db = state.db.lock().await;
     let mut task = db.get_task(&submission.task_id)?
-        .ok_or_else(|| ApiError::NotFound(format!("Task {} not found", submission.task_id)))?;
+        .ok_or_else(|| ApiError::NotFound(format!("Task not found: {}", submission.task_id)))?;
     
-    // Check if task is assigned to this client
-    if task.status != TaskStatus::Assigned && task.status != TaskStatus::InProgress {
-        return Err(ApiError::BadRequest(format!("Task {} is not in progress", submission.task_id)));
-    }
-    
-    if task.assigned_to.as_ref() != Some(&submission.client_id) {
-        return Err(ApiError::BadRequest(format!("Task {} is not assigned to client {}", 
-            submission.task_id, submission.client_id)));
-    }
-    
-    // Convert submission to CrawlReport
-    let mut report = CrawlReport {
+    // Create report
+    let report = CrawlReport {
         task_id: submission.task_id.clone(),
         client_id: submission.client_id.clone(),
-        domain: submission.domain,
+        domain: submission.domain.clone(),
         pages_count: submission.pages.len(),
         total_size: submission.pages.iter().map(|p| p.size).sum(),
         pages: submission.pages.iter().map(|p| crate::models::CrawledPage {
@@ -325,7 +314,7 @@ async fn submit_report(
             timestamp: p.timestamp,
         }).collect(),
         start_time: submission.start_time,
-        end_time: submission.end_time,
+        end_time: Some(submission.end_time),
         verified: false,
         verification_score: None,
         verification_notes: None,

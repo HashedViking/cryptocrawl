@@ -1,44 +1,34 @@
-use crate::models::{CrawledPage, CrawlResult, Task};
+use crate::models::{CrawledPage, CrawlResult, CrawlStatus, Task};
 use anyhow::{Result, anyhow};
 use log::{info, warn, error, debug};
 use spider::{website::Website, http::Status, page::Page};
 use tokio::sync::mpsc;
 use url::Url;
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Instant};
 
 /// Implementation of the web crawler
 pub struct Crawler {
     /// Current task being processed
-    current_task: Option<Task>,
-    
-    /// Current crawl result
-    current_result: Option<CrawlResult>,
+    current_task: Task,
 }
 
 impl Crawler {
-    /// Create a new crawler instance
-    pub fn new() -> Self {
+    /// Create a new crawler instance with a task
+    pub fn new(task: Task) -> Self {
         Self {
-            current_task: None,
-            current_result: None,
+            current_task: task,
         }
     }
     
     /// Get the current task
-    pub fn current_task(&self) -> Option<&Task> {
-        self.current_task.as_ref()
+    pub fn current_task(&self) -> &Task {
+        &self.current_task
     }
     
-    /// Get the current crawl result
-    pub fn current_result(&self) -> Option<&CrawlResult> {
-        self.current_result.as_ref()
-    }
-    
-    /// Crawl a URL based on the given task
-    pub async fn crawl(&mut self, task: Task) -> Result<CrawlResult> {
-        // Store current task
-        self.current_task = Some(task.clone());
+    /// Crawl a URL based on the current task
+    pub async fn crawl(&self) -> Result<CrawlResult> {
+        let task = &self.current_task;
         
         // Parse the target URL
         let target_url = &task.target_url;
@@ -53,10 +43,10 @@ impl Crawler {
         // Create a new crawl result
         let mut result = CrawlResult::new(&task.id, &domain);
         
-        // Store the current result
-        self.current_result = Some(result.clone());
-        
         info!("Starting crawl of {} (task {})", target_url, task.id);
+        
+        // Record start time for performance measurement
+        let start_time = Instant::now();
         
         // Create a channel for receiving crawled pages
         let (tx, mut rx) = mpsc::channel(100);
@@ -72,7 +62,7 @@ impl Crawler {
         website.config.respect_robots_txt = true;
         website.config.subdomains = task.follow_subdomains;
         website.config.max_depth = task.max_depth as usize;
-        website.config.max_pages = task.max_links.unwrap_or(1000);
+        website.config.max_pages = task.max_links.unwrap_or(1000) as usize;
         website.config.delay = 200; // 200ms delay between requests
         
         // Clone transmitter for the subscription
@@ -159,9 +149,6 @@ impl Crawler {
             // Add the page to the result
             result.add_page(crawled_page);
             
-            // Update the current result
-            self.current_result = Some(result.clone());
-            
             // Increment page count
             pages_count += 1;
             
@@ -174,14 +161,14 @@ impl Crawler {
             }
         }
         
+        // Record elapsed time
+        let crawl_duration = start_time.elapsed();
+        
         // Mark the crawl as complete
         result.complete();
         
-        // Update the current result
-        self.current_result = Some(result.clone());
-        
-        info!("Completed crawl of {} - {} pages, {} bytes total",
-            target_url, result.pages_count, result.total_size);
+        info!("Completed crawl of {} - {} pages, {} bytes total in {:.2?}",
+            target_url, result.pages_count, result.total_size, crawl_duration);
         
         Ok(result)
     }

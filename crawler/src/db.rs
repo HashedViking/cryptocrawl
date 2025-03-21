@@ -1,10 +1,12 @@
-use crate::models::{Task, CrawlResult, CrawledPage, CrawlStatus};
+use crate::models::{Task, CrawlResult, CrawledPage, CrawlStatus, CrawlReport};
 use anyhow::{Result, Context, anyhow};
 use rusqlite::{params, Connection, OptionalExtension};
-use log::{info, warn, error};
+use log::{info, warn, error, debug};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Database for storing tasks and crawl results
 pub struct Database {
@@ -13,11 +15,25 @@ pub struct Database {
 }
 
 impl Database {
-    /// Create a new database instance
-    pub fn new(db_path: &Path) -> Result<Self> {
+    /// Create a new database instance from a path
+    pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        // Get the path
+        let path = db_path.as_ref();
+        
+        // Log the database location
+        info!("Opening database at {:?}", path);
+        
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)
+                    .context(format!("Failed to create directory: {:?}", parent))?;
+            }
+        }
+        
         // Connect to database
-        let conn = Connection::open(db_path)
-            .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database at {:?}", path))?;
         
         // Create new database instance
         let mut db = Self { conn };
@@ -28,8 +44,15 @@ impl Database {
         Ok(db)
     }
     
+    /// Create a new database instance from a string path
+    pub fn from_path(db_path: &str) -> Result<Self> {
+        Self::new(PathBuf::from(db_path))
+    }
+    
     /// Initialize database tables
     fn init(&mut self) -> Result<()> {
+        info!("Initializing database tables");
+        
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -74,6 +97,21 @@ impl Database {
             [],
         )?;
         
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS crawl_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                pages_crawled INTEGER NOT NULL,
+                total_size_bytes INTEGER NOT NULL,
+                crawl_duration_ms INTEGER NOT NULL,
+                transaction_signature TEXT,
+                timestamp INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks (id)
+            )",
+            [],
+        )?;
+        
+        info!("Database tables initialized successfully");
         Ok(())
     }
     
@@ -352,5 +390,58 @@ impl Database {
         .collect::<Result<Vec<_>, _>>()?;
         
         Ok(history)
+    }
+    
+    /// Save a crawl report to the database
+    pub fn save_crawl_report(&self, report: &CrawlReport) -> Result<()> {
+        // Get current timestamp
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // Save the crawl report
+        self.conn.execute(
+            "INSERT INTO crawl_reports (
+                task_id, pages_crawled, total_size_bytes, 
+                crawl_duration_ms, transaction_signature, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                report.task_id,
+                report.pages_crawled as i64,
+                report.total_size_bytes as i64,
+                report.crawl_duration_ms as i64,
+                report.transaction_signature,
+                timestamp,
+            ],
+        ).context("Failed to save crawl report")?;
+        
+        // Save the crawled pages
+        let tx = self.conn.transaction()
+            .context("Failed to start transaction")?;
+        
+        for page in &report.pages {
+            tx.execute(
+                "INSERT INTO crawled_pages (
+                    task_id, url, size, timestamp, content_type, status_code
+                ) VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    report.task_id,
+                    page.url,
+                    page.size as i64,
+                    page.timestamp,
+                    page.content_type,
+                    page.status_code,
+                ],
+            ).context("Failed to save crawled page")?;
+        }
+        
+        // Commit the transaction
+        tx.commit().context("Failed to commit transaction")?;
+        
+        info!("Saved crawl report for task {} with {} pages", 
+              report.task_id, report.pages_crawled);
+        
+        Ok(())
     }
 } 

@@ -1,175 +1,233 @@
-use anyhow::{Result, anyhow};
-use log::info;
-use ollama_rs::Ollama;
-use ollama_rs::generation::completion::{request::GenerationRequest, response::GenerationResponse};
-use crate::models::{CrawlReport, CrawledPage};
-use daipendency::DependencyExtractor;
+use anyhow::{Result, anyhow, Context};
+use log::{info, warn, debug};
+use crate::models::CrawlReport;
+use reqwest::Client;
+use std::time::Duration;
+use std::process::Command;
+use std::fs;
 
-/// Evaluator for crawl reports using LLM
+/// LLM-based evaluator for crawl reports
 pub struct Evaluator {
-    /// Ollama client
-    ollama: Ollama,
-    /// Model to use
+    /// Ollama host URL
+    host: String,
+    /// Ollama model to use
     model: String,
+    /// HTTP client
+    client: Client,
 }
 
 impl Evaluator {
-    /// Create a new evaluator
+    /// Create a new evaluator instance
     pub fn new(host: &str, model: &str) -> Self {
-        let ollama = Ollama::new(host.to_string(), None);
-        
-        Evaluator {
-            ollama,
+        Self {
+            host: host.to_string(),
             model: model.to_string(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
     
     /// Verify a crawl report using LLM
     pub async fn verify_report(&self, report: &CrawlReport) -> Result<(bool, f64, String)> {
-        info!("Evaluating crawl report for task {} with {} pages", report.task_id, report.pages_count);
+        // Create verification prompt
+        let prompt = self.create_verification_prompt(report);
         
-        // Extract relevant information for the LLM to evaluate
-        let verification_prompt = self.create_verification_prompt(report);
+        // Query LLM
+        info!("Querying LLM to verify report with {} pages", report.pages_count);
+        let response = self.query_llm(&prompt).await?;
         
-        // Generate request
-        let gen_req = GenerationRequest::new(
-            self.model.clone(),
-            verification_prompt
-        );
+        // Extract verification result
+        let (is_valid, confidence, reason) = self.parse_verification_result(&response)?;
         
-        // Get response from Ollama
-        let response = self.ollama.generate(gen_req).await?;
+        info!("Report verification result: valid={}, confidence={:.2}, reason={}",
+              is_valid, confidence, reason);
         
-        // Parse the response - we expect a format like "SCORE: X.X\nVERIFIED: true/false\nREASONING: ..."
-        let verification_result = self.parse_verification_response(&response)?;
-        
-        Ok(verification_result)
+        Ok((is_valid, confidence, reason))
     }
     
-    /// Create a prompt for the LLM to verify a crawl report
-    fn create_verification_prompt(&self, report: &CrawlReport) -> String {
-        let mut prompt = format!(
-            "You are an expert web crawling validator. You need to verify if the following crawl report for the domain '{}' is valid and complete.\n\n",
-            report.domain
-        );
+    /// Get API documentation for a package using daipendency
+    pub async fn get_api_documentation(&self, package: &str) -> Result<String> {
+        info!("Extracting API documentation for package: {}", package);
         
-        prompt.push_str("CRAWL REPORT:\n");
-        prompt.push_str(&format!("Domain: {}\n", report.domain));
-        prompt.push_str(&format!("Pages crawled: {}\n", report.pages_count));
-        prompt.push_str(&format!("Total data size: {} bytes\n", report.total_size));
+        // Use the daipendency CLI to extract API documentation
+        let output = Command::new("daipendency")
+            .args(["extract-dep", package, "--language=rust"])
+            .output()
+            .context("Failed to run daipendency CLI")?;
         
-        // Add details about the first few pages (limit to 5 to avoid too large prompts)
-        prompt.push_str("\nSAMPLE PAGES:\n");
-        for (i, page) in report.pages.iter().take(5).enumerate() {
-            prompt.push_str(&format!("{}. URL: {}\n   Size: {} bytes\n", 
-                i + 1, page.url, page.size));
+        if !output.status.success() {
+            return Err(anyhow!("daipendency CLI failed: {}", String::from_utf8_lossy(&output.stderr)));
         }
         
-        prompt.push_str("\nEVALUATION TASK:\n");
-        prompt.push_str("1. Assess if the crawl appears to be genuine and comprehensive for the given domain.\n");
-        prompt.push_str("2. Check if the number of pages and data size are reasonable for the domain.\n");
-        prompt.push_str("3. Verify if the URLs in the sample follow a pattern consistent with the domain.\n");
-        prompt.push_str("4. Look for any anomalies or signs of gaming the system.\n\n");
+        let docs = String::from_utf8_lossy(&output.stdout).to_string();
+        debug!("Extracted API documentation for {}", package);
         
-        prompt.push_str("PROVIDE YOUR EVALUATION IN THIS EXACT FORMAT:\n");
-        prompt.push_str("SCORE: [a number between 0.0 and 1.0 indicating confidence in validity]\n");
-        prompt.push_str("VERIFIED: [true or false]\n");
-        prompt.push_str("REASONING: [your detailed reasoning for the decision]\n");
+        // Cache the documentation for future use
+        let cache_dir = "cache/api_docs";
+        if !std::path::Path::new(cache_dir).exists() {
+            fs::create_dir_all(cache_dir)?;
+        }
+        
+        let cache_path = format!("{}/{}.md", cache_dir, package);
+        fs::write(&cache_path, &docs)
+            .context(format!("Failed to cache API documentation for {} to {}", package, cache_path))?;
+        
+        info!("API documentation for {} saved to {}", package, cache_path);
+        
+        // Enhance documentation with LLM insights
+        if let Ok(enhanced_docs) = self.enhance_documentation_with_llm(&docs, package).await {
+            return Ok(enhanced_docs);
+        }
+        
+        Ok(docs)
+    }
+    
+    /// Enhance API documentation with LLM insights and examples
+    async fn enhance_documentation_with_llm(&self, docs: &str, package: &str) -> Result<String> {
+        let prompt = format!(
+            "You are an expert Rust developer. Below is the API documentation for the {} crate:
+            
+            {}
+            
+            Please enhance this documentation by:
+            1. Adding usage examples for the most important functions/methods
+            2. Explaining common patterns and best practices
+            3. Identifying potential pitfalls or gotchas
+            4. Providing context on how different components relate to each other
+            
+            Format your response as Markdown, preserving the original documentation and adding your enhancements.",
+            package, docs
+        );
+        
+        match self.query_llm(&prompt).await {
+            Ok(response) => {
+                info!("Enhanced API documentation for {} with LLM insights", package);
+                Ok(response)
+            },
+            Err(e) => {
+                warn!("Failed to enhance documentation with LLM: {}", e);
+                Ok(docs.to_string()) // Return original docs if enhancement fails
+            }
+        }
+    }
+    
+    /// Create verification prompt for LLM
+    fn create_verification_prompt(&self, report: &CrawlReport) -> String {
+        // Calculate crawl duration in ms
+        let duration = match report.end_time {
+            Some(end) => (end - report.start_time) * 1000, // Convert seconds to ms
+            None => 0,
+        };
+        
+        let mut prompt = format!(
+            "You are a web crawl verification agent. Please verify the following crawl report:
+            
+            Task ID: {}
+            Pages Crawled: {}
+            Total Size: {} bytes
+            Crawl Duration: {} ms
+            
+            Please analyze the crawled pages and verify:
+            1. That the page sizes look reasonable
+            2. That the content types are valid
+            3. That the URL structure is consistent
+            4. That there are no obvious fake or malicious entries
+            
+            The first 10 crawled pages are:
+            ",
+            report.task_id,
+            report.pages_count,
+            report.total_size,
+            duration
+        );
+        
+        // Add up to 10 page samples
+        for (i, page) in report.pages.iter().take(10).enumerate() {
+            prompt.push_str(&format!(
+                "{}. URL: {}, Size: {} bytes, Content-Type: {}, Status: {}\n",
+                i + 1,
+                page.url,
+                page.size,
+                page.content_type.as_deref().unwrap_or("unknown"),
+                page.status.unwrap_or(0)
+            ));
+        }
+        
+        prompt.push_str("\nBased on the above information, please respond with:
+            
+        VALID: [true/false]
+        CONFIDENCE: [0.0-1.0]
+        REASON: [brief explanation of your decision]");
         
         prompt
     }
     
-    /// Parse the LLM's response to extract verification details
-    fn parse_verification_response(&self, response: &GenerationResponse) -> Result<(bool, f64, String)> {
-        let response_text = &response.response;
+    /// Query Ollama LLM
+    async fn query_llm(&self, prompt: &str) -> Result<String> {
+        let url = format!("{}/api/generate", self.host);
         
-        // Extract score
-        let score = if let Some(score_line) = response_text.lines()
-            .find(|line| line.trim().starts_with("SCORE:")) {
-            let score_part = score_line.trim().replace("SCORE:", "").trim().to_string();
-            score_part.parse::<f64>().unwrap_or(0.0)
+        let response = self.client.post(&url)
+            .json(&serde_json::json!({
+                "model": self.model,
+                "prompt": prompt,
+                "stream": false
+            }))
+            .send()
+            .await
+            .context("Failed to query LLM")?;
+        
+        if response.status().is_success() {
+            let result: serde_json::Value = response.json().await
+                .context("Failed to parse LLM response")?;
+            
+            if let Some(response_text) = result.get("response").and_then(|v| v.as_str()) {
+                Ok(response_text.to_string())
+            } else {
+                Err(anyhow::anyhow!("Invalid LLM response format"))
+            }
         } else {
-            return Err(anyhow!("Could not parse score from LLM response"));
-        };
-        
-        // Extract verification status
-        let verified = if let Some(verified_line) = response_text.lines()
-            .find(|line| line.trim().starts_with("VERIFIED:")) {
-            let verified_part = verified_line.trim().replace("VERIFIED:", "").trim().to_string();
-            verified_part.to_lowercase() == "true"
-        } else {
-            return Err(anyhow!("Could not parse verification status from LLM response"));
-        };
-        
-        // Extract reasoning
-        let reasoning = if let Some(reasoning_index) = response_text.find("REASONING:") {
-            response_text[reasoning_index..].replace("REASONING:", "").trim().to_string()
-        } else {
-            "No detailed reasoning provided".to_string()
-        };
-        
-        Ok((verified, score, reasoning))
+            let status = response.status();
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            
+            Err(anyhow::anyhow!("LLM API error: {} - {}", status, error_text))
+        }
     }
     
-    /// Get API documentation using daipendency
-    pub async fn get_api_documentation(&self, package_name: &str) -> Result<String> {
-        let extractor = DependencyExtractor::new();
+    /// Parse verification result from LLM response
+    fn parse_verification_result(&self, response: &str) -> Result<(bool, f64, String)> {
+        // Extract valid flag
+        let valid_line = response.lines()
+            .find(|line| line.trim().starts_with("VALID:"))
+            .unwrap_or("VALID: false");
         
-        // Extract documentation
-        let docs = extractor.extract_docs(package_name).await?;
+        let valid = valid_line.contains("true");
         
-        // Format as markdown
-        let mut formatted_docs = format!("# API Documentation for {}\n\n", package_name);
+        // Extract confidence
+        let confidence_line = response.lines()
+            .find(|line| line.trim().starts_with("CONFIDENCE:"))
+            .unwrap_or("CONFIDENCE: 0.0");
         
-        // Add classes, methods, etc.
-        for item in docs.items {
-            formatted_docs.push_str(&format!("## {}\n\n", item.name));
-            
-            if let Some(description) = item.description {
-                formatted_docs.push_str(&format!("{}\n\n", description));
-            }
-            
-            if !item.methods.is_empty() {
-                formatted_docs.push_str("### Methods\n\n");
-                
-                for method in item.methods {
-                    formatted_docs.push_str(&format!("#### {}\n\n", method.name));
-                    
-                    if let Some(description) = method.description {
-                        formatted_docs.push_str(&format!("{}\n\n", description));
-                    }
-                    
-                    if !method.params.is_empty() {
-                        formatted_docs.push_str("Parameters:\n");
-                        
-                        for param in method.params {
-                            formatted_docs.push_str(&format!("- `{}`: {}\n", 
-                                param.name,
-                                param.description.unwrap_or_else(|| "No description".to_string())));
-                        }
-                        
-                        formatted_docs.push_str("\n");
-                    }
-                    
-                    if let Some(returns) = method.returns {
-                        formatted_docs.push_str(&format!("Returns: {}\n\n", returns));
-                    }
-                }
-            }
-            
-            if !item.properties.is_empty() {
-                formatted_docs.push_str("### Properties\n\n");
-                
-                for prop in item.properties {
-                    formatted_docs.push_str(&format!("- `{}`: {}\n", 
-                        prop.name,
-                        prop.description.unwrap_or_else(|| "No description".to_string())));
-                }
-                
-                formatted_docs.push_str("\n");
-            }
-        }
+        let confidence: f64 = confidence_line
+            .split(':')
+            .nth(1)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0.0);
         
-        Ok(formatted_docs)
+        // Extract reason
+        let reason_line = response.lines()
+            .find(|line| line.trim().starts_with("REASON:"))
+            .unwrap_or("REASON: Unknown");
+        
+        let reason = reason_line
+            .split(':')
+            .nth(1)
+            .unwrap_or("Unknown")
+            .trim()
+            .to_string();
+        
+        Ok((valid, confidence, reason))
     }
 } 

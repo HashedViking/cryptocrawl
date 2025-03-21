@@ -5,6 +5,7 @@ use std::path::Path;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::Rng;
+use crate::models::CrawlResult;
 
 /// Represents the integration with the Solana blockchain
 pub struct SolanaIntegration {
@@ -15,34 +16,50 @@ pub struct SolanaIntegration {
     /// Program ID for the CryptoCrawl program
     program_id: String,
     /// Manager's public key (for submitting reports)
-    manager_pubkey: String,
+    manager_pubkey: Option<String>,
 }
 
 impl SolanaIntegration {
     /// Create a new Solana integration
     pub fn new(
-        keypair_path: &str, 
         rpc_endpoint: &str, 
+        keypair_path: Option<&str>, 
         program_id: &str,
-        manager_pubkey: &str,
     ) -> Result<Self> {
+        let keypair_path = match keypair_path {
+            Some(path) => path.to_string(),
+            None => "wallet.json".to_string(),
+        };
+        
         // Check if keypair exists
-        if !Path::new(keypair_path).exists() {
+        if !Path::new(&keypair_path).exists() {
             // In a real implementation, we would create a new keypair
             // For now, just simulate it
             info!("Creating new Solana keypair at {}", keypair_path);
             
+            // Ensure parent directory exists
+            if let Some(parent) = Path::new(&keypair_path).parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            
             // This is a placeholder. In a real implementation, we would use solana-sdk
             let dummy_keypair = r#"{"privateKey":[1,2,3,4],"publicKey":[5,6,7,8]}"#;
-            fs::write(keypair_path, dummy_keypair)?;
+            fs::write(&keypair_path, dummy_keypair)?;
         }
         
         Ok(Self {
-            keypair_path: keypair_path.to_string(),
+            keypair_path,
             rpc_endpoint: rpc_endpoint.to_string(),
             program_id: program_id.to_string(),
-            manager_pubkey: manager_pubkey.to_string(),
+            manager_pubkey: None,
         })
+    }
+    
+    /// Set manager's public key
+    pub fn set_manager_pubkey(&mut self, pubkey: &str) {
+        self.manager_pubkey = Some(pubkey.to_string());
     }
     
     /// Get wallet address (public key)
@@ -60,7 +77,39 @@ impl SolanaIntegration {
         Ok(rng.gen_range(10_000_000..100_000_000))
     }
     
-    /// Submit crawl data to the blockchain
+    /// Submit crawl report to the blockchain
+    pub async fn submit_crawl_report(&self, task_id: &str, crawl_result: &CrawlResult) -> Result<String> {
+        // Log the submission
+        info!(
+            "Submitting crawl report to Solana: task={}, domain={}, pages={}, size={}",
+            task_id, crawl_result.domain, crawl_result.pages_count, crawl_result.total_size
+        );
+        
+        // In a real implementation, we would build and submit a Solana transaction
+        // For now, just simulate a transaction hash
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let tx_hash = format!(
+            "5{}{}{:x}{}",
+            crawl_result.domain.chars().take(3).collect::<String>(),
+            task_id.chars().take(4).collect::<String>(),
+            timestamp,
+            crawl_result.pages_count
+        );
+        
+        // Simulate network delay
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        // Simulate success
+        info!("Crawl report submitted successfully: {}", tx_hash);
+        Ok(tx_hash)
+    }
+    
+    /// Submit crawl data to the blockchain (deprecated, use submit_crawl_report instead)
+    #[deprecated]
     pub fn submit_crawl_data(
         &self,
         task_id: &str,

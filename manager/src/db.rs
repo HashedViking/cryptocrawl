@@ -1,8 +1,10 @@
 use crate::models::{Task, TaskStatus, CrawlReport, CrawledPage};
-use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, Result as SqliteResult};
-use std::path::Path;
+use anyhow::{anyhow, Result, Context};
+use rusqlite::{params, Connection};
+use std::path::{Path, PathBuf};
+use std::fs;
 use serde_json;
+use log::info;
 
 /// Manages the database for the manager
 pub struct Database {
@@ -10,14 +12,29 @@ pub struct Database {
 }
 
 impl Database {
-    /// Create a new database connection
-    pub fn new(db_path: &str) -> Result<Self> {
+    /// Create a new database connection from a path
+    pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        // Get the path
+        let path = db_path.as_ref();
+        
+        // Log the database location
+        info!("Opening database at {:?}", path);
+        
+        // Check if the parent directory exists, if not create it
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                info!("Creating directory: {:?}", parent);
+                fs::create_dir_all(parent)
+                    .context(format!("Failed to create directory {:?}", parent))?;
+            }
+        }
+        
         // Check if the database file exists
-        let path = Path::new(db_path);
         let db_exists = path.exists();
         
         // Connect to the database
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(path)
+            .context(format!("Failed to open database at {:?}", path))?;
         
         // Create a new instance
         let mut db = Database { conn };
@@ -30,8 +47,15 @@ impl Database {
         Ok(db)
     }
     
+    /// Create a new database instance from a string path
+    pub fn from_path(db_path: &str) -> Result<Self> {
+        Self::new(PathBuf::from(db_path))
+    }
+    
     /// Initialize the database schema
     fn init_database(&mut self) -> Result<()> {
+        info!("Initializing database tables");
+        
         // Create tasks table
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS tasks (
@@ -70,6 +94,7 @@ impl Database {
             [],
         )?;
         
+        info!("Database tables initialized successfully");
         Ok(())
     }
     
@@ -251,36 +276,54 @@ impl Database {
     /// Get a report by task ID
     pub fn get_report_by_task(&self, task_id: &str) -> Result<Option<CrawlReport>> {
         let mut stmt = self.conn.prepare(
-            "SELECT 
-                task_id, client_id, domain, pages_count, total_size,
-                pages, start_time, end_time, verified, verification_score, verification_notes
-            FROM reports
-            WHERE task_id = ?"
+            "SELECT task_id, client_id, domain, pages_count, total_size, pages, 
+             start_time, end_time, verified, verification_score, verification_notes 
+             FROM reports WHERE task_id = ?"
         )?;
         
         let report_result = stmt.query_row(params![task_id], |row| {
+            let task_id: String = row.get(0)?;
+            let client_id: String = row.get(1)?;
+            let domain: String = row.get(2)?;
+            let pages_count: usize = row.get(3)?;
+            let total_size: usize = row.get(4)?;
             let pages_json: String = row.get(5)?;
-            let pages: Vec<CrawledPage> = serde_json::from_str(&pages_json)?;
+            let start_time: u64 = row.get(6)?;
+            let end_time: Option<u64> = row.get(7)?;
+            let verified: bool = row.get(8)?;
+            let verification_score: Option<f64> = row.get(9)?;
+            let verification_notes: Option<String> = row.get(10)?;
             
-            Ok(CrawlReport {
-                task_id: row.get(0)?,
-                client_id: row.get(1)?,
-                domain: row.get(2)?,
-                pages_count: row.get(3)?,
-                total_size: row.get(4)?,
-                pages,
-                start_time: row.get(6)?,
-                end_time: row.get(7)?,
-                verified: row.get::<_, i32>(8)? != 0,
-                verification_score: row.get(9)?,
-                verification_notes: row.get(10)?,
-            })
+            Ok((
+                task_id, client_id, domain, pages_count, total_size, pages_json,
+                start_time, end_time, verified, verification_score, verification_notes
+            ))
         });
         
         match report_result {
-            Ok(report) => Ok(Some(report)),
+            Ok((task_id, client_id, domain, pages_count, total_size, pages_json,
+                start_time, end_time, verified, verification_score, verification_notes)) => {
+                
+                // Parse pages JSON outside the query_row closure
+                let pages: Vec<CrawledPage> = serde_json::from_str(&pages_json)
+                    .context("Failed to parse pages JSON")?;
+                
+                Ok(Some(CrawlReport {
+                    task_id,
+                    client_id,
+                    domain,
+                    pages_count,
+                    total_size,
+                    pages,
+                    start_time,
+                    end_time,
+                    verified,
+                    verification_score,
+                    verification_notes,
+                }))
+            },
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow!(e)),
+            Err(e) => Err(anyhow!("Database error: {}", e)),
         }
     }
     

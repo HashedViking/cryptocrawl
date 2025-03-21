@@ -1,95 +1,171 @@
 # CryptoCrawl
 
-A blockchain incentivized web crawler Proof-of-Concept built with Rust and Solana.
+A decentralized web crawling platform powered by Solana blockchain.
 
 ## Overview
 
-CryptoCrawl is a web crawler that uses blockchain technology to incentivize web crawling activities. The crawler collects web data and receives token incentives through the Solana blockchain.
+CryptoCrawl is a distributed web crawling system that uses blockchain technology to incentivize participants. The system consists of two main components:
 
-### Key Components
-
-1. **Web Crawler** - Built using [spider-rs](https://github.com/spider-rs/spider), a powerful and fast web crawler for Rust
-2. **Blockchain Integration** - Using Solana for incentivization
-3. **Crawler Reports** - Structured data about crawled websites
-
-## Features
-
-- Configurable web crawling with depth and concurrency controls
-- Automatic collection of page data (URL, status, content type, size)
-- Integration with Solana blockchain for incentives
-- Reporting of crawl statistics
+1. **Manager**: Coordinates crawl tasks, verifies results, and handles incentive distribution.
+2. **Crawler**: Performs the actual web crawling, submits reports, and earns incentives.
 
 ## Prerequisites
 
-- Rust (1.70.0 or later)
-- Cargo
-- Internet connection
-- (Optional) Solana CLI tools for advanced blockchain interactions
+- Rust 1.56.0 or higher
+- SQLite 3
+- Solana CLI (for blockchain interaction)
+- Ollama (for AI-powered verification)
 
-## Installation
+## API Documentation with daipendency
 
-1. Clone this repository:
-```
-git clone https://github.com/yourusername/cryptocrawl.git
-cd cryptocrawl
-```
+The CryptoCrawl project uses `daipendency` (v1.2.5) for extracting API documentation from crates to make it easier to understand and work with dependencies.
 
-2. Build the project:
-```
-cargo build --release
-```
+### Using the CLI Tool
 
-## Usage
+You can extract API documentation using the standalone binary:
 
-### Basic Crawl
+```bash
+# Extract API docs for any crate
+cargo run --bin extract_api_docs -- <crate-name>
 
-To crawl a website and simulate blockchain incentivization:
-
-```
-cargo run -- https://example.com
+# Examples
+cargo run --bin extract_api_docs -- anyhow
+cargo run --bin extract_api_docs -- spider
 ```
 
-Replace `https://example.com` with the URL you want to crawl.
+The tool will output the documentation in a format that is friendly for large language models, including detailed information about the crate's structs, functions, enums, and traits.
 
-### Advanced Usage
+### Using from Manager
 
-You can customize the crawl behavior by modifying the code:
+The manager application includes a command for generating API documentation:
 
-- Change max depth in `main.rs`:
-  ```rust
-  spider.set_max_depth(3); // Increase to crawl deeper
-  ```
+```bash
+cargo run --bin cryptocrawl-manager -- get-api-docs <crate-name>
+```
 
-- Adjust concurrency:
-  ```rust
-  spider.set_concurrency(5); // Increase for faster crawling
-  ```
+### Implementation Details
+
+The API documentation extraction uses the `daipendency` CLI under the hood, which formats the output in a way that preserves the structure and context of the documentation. The implementation can be found in:
+
+- `tools/src/bin/extract_api_docs.rs` - Standalone binary for API extraction
+- `manager/src/evaluator.rs` - Integration with the manager application
 
 ## Project Structure
 
-- `src/main.rs` - Main application code and crawler implementation
-- `src/solana_integration.rs` - Solana blockchain integration code
-- `src/crawl_data.rs` - Data structures for crawl reports
+```
+cryptocrawl/
+├── manager/         # Manager component
+├── crawler/         # Crawler component
+├── tools/           # Utility tools
+├── data/            # Data directories (created at runtime)
+│   ├── manager/     # Manager database and logs
+│   └── crawler/     # Crawler database and logs
+├── cache/           # Cache for API documentation
+├── keys/            # Solana keypair storage
+├── config/          # Configuration files
+└── logs/            # Log files
+```
 
-## Blockchain Integration
+## Setup
 
-In this PoC:
-- The crawler simulates submitting crawl reports to the Solana blockchain
-- Incentives are calculated based on the crawl activity
-- For a production version, a real Solana program would need to be deployed
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/cryptocrawl.git
+   cd cryptocrawl
+   ```
 
-## Future Enhancements
+2. Run the setup script to create the necessary directories:
+   ```
+   cargo run --bin setup
+   ```
 
-- Implement actual Solana smart contract for real incentivization
-- Add distributed crawling capabilities
-- Implement data quality validation
-- Add more advanced crawling features (JavaScript rendering, etc.)
-- Create a marketplace for crawl requests
+3. Build both components:
+   ```
+   cargo build
+   ```
+
+## Running the Manager
+
+Start the manager server with:
+
+```
+cargo run --bin manager -- server --db-path data/manager/manager.db
+```
+
+Additional options:
+- `--host <HOST>`: Bind to a specific host (default: 127.0.0.1)
+- `--port <PORT>`: Bind to a specific port (default: 8000)
+- `--log-level <LEVEL>`: Set log level (default: info)
+- `--keypair-path <PATH>`: Path to Solana keypair (default: keys/manager_wallet.json)
+- `--rpc-endpoint <URL>`: Solana RPC endpoint (default: https://api.devnet.solana.com)
+- `--ollama-host <URL>`: Ollama API host (default: http://localhost:11434)
+- `--ollama-model <MODEL>`: Ollama model to use (default: llama3)
+
+Create a new crawl task:
+
+```
+cargo run --bin manager -- create-task https://example.com --max-depth 2 --follow-subdomains
+```
+
+## Running the Crawler
+
+Start a crawler that continuously polls for new tasks:
+
+```
+cargo run --bin crawler -- --db-path data/crawler/crawler.db --manager-url http://localhost:8000
+```
+
+Additional options:
+- `--log-level <LEVEL>`: Set log level (default: info)
+- `--keypair-path <PATH>`: Path to Solana keypair (default: keys/crawler_wallet.json)
+- `--rpc-endpoint <URL>`: Solana RPC endpoint (default: https://api.devnet.solana.com)
+- `--poll-interval <SECONDS>`: Time between polls for new tasks (default: 60)
+- `--config <PATH>`: Path to configuration file
+
+## Configuration
+
+Both the manager and crawler support JSON configuration files. Example:
+
+### Manager Config (config/manager.json)
+```json
+{
+    "db_path": "data/manager/manager.db",
+    "log_level": "info",
+    "keypair_path": "keys/manager_wallet.json",
+    "rpc_endpoint": "https://api.devnet.solana.com",
+    "program_id": "CrawLY3R5pzRHE1b31TvhG8zX1CRkFxc1xECDZ97ihkUS",
+    "ollama_host": "http://localhost:11434",
+    "ollama_model": "llama3",
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8000
+    }
+}
+```
+
+### Crawler Config (config/crawler.json)
+```json
+{
+    "db_path": "data/crawler/crawler.db",
+    "log_level": "info",
+    "keypair_path": "keys/crawler_wallet.json",
+    "rpc_endpoint": "https://api.devnet.solana.com",
+    "program_id": "CrawLY3R5pzRHE1b31TvhG8zX1CRkFxc1xECDZ97ihkUS",
+    "manager_url": "http://localhost:8000",
+    "poll_interval": 60
+}
+```
+
+## API Documentation
+
+The manager provides an API for:
+- Task assignment
+- Report submission
+- Verification
+- Incentive distribution
+
+API documentation can be accessed at `http://localhost:8000/api/docs`.
 
 ## License
 
-MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. 
+MIT License 

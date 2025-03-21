@@ -30,6 +30,32 @@ pub struct Task {
     pub incentive_amount: u64,
 }
 
+impl Task {
+    /// Create a new task with default values
+    pub fn new(
+        id: String,
+        target_url: String,
+        max_depth: u32,
+        follow_subdomains: bool,
+        max_links: Option<usize>,
+        incentive_amount: u64,
+    ) -> Self {
+        Self {
+            id,
+            target_url,
+            max_depth,
+            follow_subdomains,
+            max_links,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            assigned_at: None,
+            incentive_amount,
+        }
+    }
+}
+
 /// Represents a crawled page
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawledPage {
@@ -114,6 +140,28 @@ pub struct CrawlResult {
     pub incentives_received: Option<i64>,
 }
 
+/// Represents a report that will be submitted to the manager
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrawlReport {
+    /// Task ID of the associated task
+    pub task_id: String,
+    
+    /// List of crawled pages
+    pub pages: Vec<CrawledPage>,
+    
+    /// Transaction signature from Solana
+    pub transaction_signature: Option<String>,
+    
+    /// Number of pages crawled
+    pub pages_crawled: usize,
+    
+    /// Total size of all crawled pages in bytes
+    pub total_size_bytes: u64,
+    
+    /// Duration of the crawl in milliseconds
+    pub crawl_duration_ms: u64,
+}
+
 impl CrawlResult {
     /// Create a new crawl result
     pub fn new(task_id: &str, domain: &str) -> Self {
@@ -179,5 +227,20 @@ impl CrawlResult {
     pub fn set_incentives(&mut self, amount: i64) {
         self.incentives_received = Some(amount);
         self.status = CrawlStatus::Verified;
+    }
+    
+    /// Convert to a CrawlReport
+    pub fn to_report(self) -> CrawlReport {
+        CrawlReport {
+            task_id: self.task_id,
+            pages: self.pages,
+            transaction_signature: self.transaction_hash,
+            pages_crawled: self.pages_count,
+            total_size_bytes: self.total_size as u64,
+            crawl_duration_ms: match self.end_time {
+                Some(end) => (end - self.start_time) * 1000, // Convert seconds to milliseconds
+                None => 0,
+            },
+        }
     }
 } 
