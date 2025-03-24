@@ -29,6 +29,9 @@ pub struct CrawlerService {
     
     /// Poll interval in seconds
     poll_interval: u64,
+    
+    /// Whether to use headless Chrome for JavaScript-heavy sites
+    use_headless_chrome: bool,
 }
 
 impl CrawlerService {
@@ -58,7 +61,14 @@ impl CrawlerService {
             solana,
             manager_url: manager_url.to_string(),
             poll_interval,
+            use_headless_chrome: false,
         })
+    }
+    
+    /// Enable headless Chrome for JavaScript-heavy sites
+    pub fn with_headless_chrome(mut self, enabled: bool) -> Self {
+        self.use_headless_chrome = enabled;
+        self
     }
     
     /// Get the client ID
@@ -118,7 +128,7 @@ impl CrawlerService {
         info!("Processing task {}: {}", task.id, task.target_url);
         
         // Ensure the task exists in the database
-        let mut db = self.db.lock().await;
+        let db = self.db.lock().await;
         let db_task = db.get_task(&task.id)?;
         if db_task.is_none() {
             info!("Task {} not found in database, saving it now", task.id);
@@ -126,13 +136,8 @@ impl CrawlerService {
         }
         drop(db); // Release the lock before the long-running crawl
         
-        // Create crawler instance
-        let task_clone = task.clone();
-        let crawler = Crawler::new(task);
-        
-        // Execute the crawl
-        info!("Starting crawl for task {}", crawler.current_task().unwrap().id);
-        let crawl_result = match crawler.crawl(&task_clone).await {
+        // Execute the crawl using our process_task method
+        let crawl_result = match self.process_task(&task).await {
             Ok(result) => result,
             Err(e) => {
                 error!("Crawl failed: {}", e);
@@ -144,7 +149,7 @@ impl CrawlerService {
             crawl_result.pages_count, crawl_result.total_size);
         
         // Save result to database
-        let mut db = self.db.lock().await;
+        let db = self.db.lock().await;
         db.save_crawl_result(&crawl_result)?;
         
         // Convert to report and submit to manager
@@ -237,7 +242,7 @@ impl CrawlerService {
             info!("Received task: id={}, url={}", task.id, task.target_url);
             
             // Save task to database to maintain foreign key relationship
-            let mut db = self.db.lock().await;
+            let db = self.db.lock().await;
             if let Err(e) = db.save_task(&task) {
                 warn!("Failed to save task to database: {}", e);
                 // Continue anyway, might work depending on DB constraints
@@ -385,7 +390,7 @@ impl CrawlerService {
     }
     
     /// Process tasks using the provided crawler
-    pub async fn process_tasks(&self, _crawler: Crawler) -> Result<()> {
+    pub async fn process_tasks(&self) -> Result<()> {
         info!("Starting crawler service with client ID {}", self.client_id);
         info!("Connecting to manager at {}", self.manager_url);
         
@@ -411,5 +416,29 @@ impl CrawlerService {
                 }
             }
         }
+    }
+    
+    /// Process a single task
+    async fn process_task(&self, task: &Task) -> Result<CrawlResult> {
+        info!("Processing task {} - URL: {}", task.id, task.target_url);
+        
+        // Clone the task for the crawler
+        let task_clone = task.clone();
+        
+        // Create a new crawler for this task with headless chrome if enabled
+        let mut crawler = Crawler::new(task_clone).with_headless_chrome(self.use_headless_chrome);
+        
+        // Try to crawl the URL
+        let crawl_result = match crawler.crawl(task).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Failed to crawl URL {}: {}", task.target_url, e);
+                return Err(e);
+            }
+        };
+        
+        info!("Crawled {} pages from {}", crawl_result.pages_count, task.target_url);
+        
+        Ok(crawl_result)
     }
 } 

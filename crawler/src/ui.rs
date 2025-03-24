@@ -233,7 +233,7 @@ fn tasks_template(tasks: &Vec<CrawlResult>) -> String {
                 status_class,
                 task.status,
                 task.pages_count,
-                task.total_size,
+                task.total_size as usize,
                 end_time,
                 incentives
             )
@@ -426,7 +426,7 @@ fn task_detail_template(task: &CrawlResult) -> String {
         status_class,
         task.status,
         task.pages_count,
-        task.total_size,
+        task.total_size as usize,
         transaction_hash,
         incentives,
         page_rows
@@ -534,7 +534,7 @@ async fn assign_task(
     
     // Save task to database
     {
-        let mut db = state.db.lock().await;
+        let db = state.db.lock().await;
         db.save_task(&task)?;
     }
     
@@ -554,7 +554,7 @@ async fn assign_task(
         };
         
         // Save result to database
-        let mut db = state_clone.db.lock().await;
+        let db = state_clone.db.lock().await;
         match db.save_crawl_result(&crawl_result) {
             Ok(_) => info!("Saved crawl result for task {}", crawl_result.task_id),
             Err(e) => error!("Failed to save crawl result: {}", e),
@@ -590,7 +590,7 @@ async fn assign_task(
                             info!("Claimed {} incentive tokens", amount);
                             
                             // Update database - tokio's Mutex.lock() returns MutexGuard directly, not Result
-                            let mut db_guard = db_clone.lock().await;
+                            let db_guard = db_clone.lock().await;
                             if let Err(e) = db_guard.update_crawl_result(&updated_result) {
                                 error!("Failed to update crawl result with transaction: {}", e);
                             }
@@ -665,7 +665,7 @@ async fn get_status_data(
                 url: task.target_url.clone(),
                 status: result.status.to_string(),
                 pages_crawled: result.pages_count,
-                data_size: result.total_size,
+                data_size: result.total_size as usize,
             })
         } else {
             // Task exists but no result yet

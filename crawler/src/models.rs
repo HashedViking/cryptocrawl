@@ -129,7 +129,7 @@ pub struct CrawlResult {
     pub pages: Vec<CrawledPage>,
     
     /// Total size of all crawled pages in bytes
-    pub total_size: usize,
+    pub total_size: u64,
     
     /// When the crawl started (Unix timestamp)
     pub start_time: u64,
@@ -212,7 +212,7 @@ impl CrawlResult {
         self.pages.push(page.clone());
         
         // Update the total size and count
-        self.total_size += page.size;
+        self.total_size += page.size as u64;
         self.pages_count += 1;
     }
     
@@ -256,11 +256,26 @@ impl CrawlResult {
             pages: self.pages,
             transaction_signature: self.transaction_hash,
             pages_crawled: self.pages_count,
-            total_size_bytes: self.total_size as u64,
+            total_size_bytes: self.total_size,
             crawl_duration_ms: match self.end_time {
                 Some(end) => (end - self.start_time) * 1000, // Convert seconds to milliseconds
                 None => 0,
             },
         }
+    }
+    
+    /// Add a page's statistics to the result without storing the content
+    pub fn add_page_stats(&mut self, page: &CrawledPage) {
+        // Track page count
+        self.pages_count += 1;
+        
+        // Add page size to total (both are usize, so no conversion needed)
+        self.total_size += page.size as u64;
+        
+        // Log the added page
+        log::info!("Added page: {} (size: {}, status: {})", 
+              page.url, 
+              page.size, 
+              page.status_code.unwrap_or(0));
     }
 } 

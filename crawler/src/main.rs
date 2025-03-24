@@ -4,6 +4,8 @@ mod models;
 mod service;
 mod solana;
 mod ui;
+mod robots;
+mod headless;
 
 use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
@@ -90,6 +92,10 @@ enum Command {
         /// Host for the UI server
         #[clap(long, default_value = "127.0.0.1")]
         server_host: String,
+        
+        /// Use headless Chrome for JavaScript sites
+        #[clap(long)]
+        use_headless_chrome: bool,
     },
     
     /// Crawl a single URL
@@ -108,6 +114,10 @@ enum Command {
         /// Maximum links to follow
         #[clap(short = 'l', long)]
         max_links: Option<usize>,
+        
+        /// Use headless Chrome for JavaScript sites
+        #[clap(long)]
+        use_headless_chrome: bool,
     },
     
     /// Crawl crates.io
@@ -127,6 +137,10 @@ enum Command {
         /// Output file for the crawl report
         #[clap(short, long)]
         output: Option<PathBuf>,
+        
+        /// Use headless Chrome for JavaScript sites
+        #[clap(long)]
+        use_headless_chrome: bool,
     },
     
     /// Register as a crawler with the manager
@@ -277,6 +291,10 @@ async fn main() -> Result<()> {
     let mut db = Database::new(&args.db_path)
         .with_context(|| format!("Failed to initialize database at {:?}", args.db_path))?;
     
+    // Initialize database tables
+    db.init_tables()
+        .with_context(|| format!("Failed to initialize database tables"))?;
+    
     // Initialize Solana integration
     let mut solana = SolanaIntegration::new(
         &args.rpc_endpoint,
@@ -302,7 +320,7 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("Failed to start UI server on {}", addr))?;
         }
         
-        Command::Service { server_host: _, server_port: _ } => {
+        Command::Service { server_host: _, server_port: _, use_headless_chrome } => {
             // Create crawler service
             let crawler_service = CrawlerService::new(
                 client_id.clone(),
@@ -311,21 +329,26 @@ async fn main() -> Result<()> {
                 db,
                 solana,
             )
-            .context("Failed to create crawler service")?;
-
-            // Process tasks
-            let crawler = Crawler::default();
+            .context("Failed to create crawler service")?
+            .with_headless_chrome(use_headless_chrome);
             
-            // Start service
+            if use_headless_chrome {
+                info!("Headless Chrome is enabled for JavaScript-dependent sites");
+            }
+
+            // Process tasks (we no longer need to pass a crawler here since we create it in process_task)
             crawler_service
-                .process_tasks(crawler)
+                .process_tasks()
                 .await
                 .context("Failed to process tasks")?;
-        }
+        },
         
-        Command::Crawl { url, max_depth, follow_subdomains, max_links } => {
+        Command::Crawl { url, max_depth, follow_subdomains, max_links, use_headless_chrome } => {
             // Create crawler
-            let crawler = Crawler::default();
+            let mut crawler = Crawler::default().with_headless_chrome(use_headless_chrome);
+            
+            // Set database connection
+            crawler.set_database(db.clone());
             
             // Create a new task
             let task = models::Task {
@@ -351,6 +374,9 @@ async fn main() -> Result<()> {
             
             // Perform the crawl
             info!("Starting crawl for {}", url);
+            if use_headless_chrome {
+                info!("Headless Chrome is enabled for JavaScript-dependent sites");
+            }
             let result = crawler.crawl(&task)
                 .await
                 .with_context(|| format!("Failed to crawl URL: {}", url))?;
@@ -366,8 +392,11 @@ async fn main() -> Result<()> {
             println!("Total data size: {} bytes", result.total_size);
         }
         
-        Command::CrawlCrates { max_depth, follow_subdomains, max_links, output } => {
+        Command::CrawlCrates { max_depth, follow_subdomains, max_links, output, use_headless_chrome } => {
             info!("Crawling crates.io with depth {}", max_depth);
+            if use_headless_chrome {
+                info!("Headless Chrome is enabled for JavaScript-dependent sites");
+            }
             
             // Create a task for crawling crates.io
             let task_id = Uuid::new_v4().to_string();
@@ -382,33 +411,59 @@ async fn main() -> Result<()> {
                 0,  // No incentive amount for direct crawls
             );
             
-            // Create crawler and crawl crates.io
-            let crawler = Crawler::new(task.clone());
-            let result = crawler.crawl(&task).await?;
+            // Prepare output file if provided
+            let output_file = if let Some(output_path) = &output {
+                info!("Setting up JSONL output to {:?}", output_path);
+                
+                // Ensure parent directory exists
+                ensure_parent_dir(output_path)?;
+                
+                // Open file for writing
+                let file = fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(output_path)
+                    .context(format!("Failed to open output file {:?}", output_path))?;
+                
+                Some(file)
+            } else {
+                None
+            };
+            
+            // Create crawler and crawl crates.io with streaming results
+            let mut crawler = Crawler::new(task.clone()).with_headless_chrome(use_headless_chrome);
+            
+            // Set database connection
+            crawler.set_database(db.clone());
+            
+            let result = crawler.crawl_with_streaming(&task, output_file).await?;
             
             // Print summary
             println!("Crawl completed!");
             println!("Pages crawled: {}", result.pages_count);
             println!("Total size: {} bytes", result.total_size);
             
-            // Create report
-            let report = result.to_report();
-            
-            // Save report to file if output is provided
+            // Create and save report summary if output was provided
             if let Some(output_path) = output {
-                info!("Saving crawl report to {:?}", output_path);
+                // We already wrote the full data as JSONL, now just save a summary
+                let summary_path = output_path.with_file_name(
+                    format!("{}_summary.json", 
+                            output_path.file_stem().unwrap_or_default().to_string_lossy()));
                 
-                // Ensure parent directory exists
-                ensure_parent_dir(&output_path)?;
+                info!("Saving crawl summary to {:?}", summary_path);
+                
+                // Create a simplified report without page content
+                let report = result.to_report();
                 
                 // Serialize report to JSON
                 let json = serde_json::to_string_pretty(&report)?;
                 
                 // Write to file
-                fs::write(&output_path, json)
-                    .context(format!("Failed to write report to {:?}", output_path))?;
+                fs::write(&summary_path, json)
+                    .context(format!("Failed to write summary to {:?}", summary_path))?;
                 
-                println!("Report saved to {:?}", output_path);
+                println!("Summary saved to {:?}", summary_path);
             }
         },
         

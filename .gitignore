@@ -3,6 +3,7 @@
 *.lock
 *.db
 *.json
+*.jsonl
 *.log
 *.txt
 *.yaml
