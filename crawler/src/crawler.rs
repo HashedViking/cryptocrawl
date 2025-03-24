@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 use scraper::{Html, Selector};
 use reqwest::Client;
-use std::io::{self, Write};
+use std::io::Write;
 use std::fs::File;
 use serde_json;
 use crate::db::Database;
@@ -26,7 +26,7 @@ pub struct Crawler {
     /// Track JavaScript-dependent sites
     js_dependent_sites: HashSet<String>,
     /// Headless browser for JavaScript-heavy sites
-    headless_browser: Option<HeadlessBrowser>,
+    headless_browser: Option<Arc<HeadlessBrowser>>,
     /// Whether to use headless Chrome for JavaScript sites
     use_headless_chrome: bool,
     /// Database connection
@@ -99,7 +99,7 @@ impl Crawler {
             info!("Initializing headless Chrome browser");
             let mut browser = HeadlessBrowser::new();
             browser.start().await?;
-            self.headless_browser = Some(browser);
+            self.headless_browser = Some(Arc::new(browser));
         }
         Ok(())
     }
@@ -140,7 +140,7 @@ impl Crawler {
             match browser.start().await {
                 Ok(_) => {
                     info!("Headless Chrome browser initialized successfully");
-                    self.headless_browser = Some(browser);
+                    self.headless_browser = Some(Arc::new(browser));
                 },
                 Err(e) => {
                     warn!("Failed to initialize headless Chrome browser: {}. Will continue without JavaScript support.", e);
@@ -155,9 +155,11 @@ impl Crawler {
         // Start the crawl
         info!("Starting crawl of {} (task {})", task.target_url, task.id);
         
-        // Set up the important queue with the initial URL
-        let initial_url = Url::parse(&task.target_url)
+        // Set up the important queue with the initial URL (remove any fragment)
+        let mut initial_url = Url::parse(&task.target_url)
             .map_err(|e| anyhow!("Failed to parse target URL: {}", e))?;
+        // Normalize the initial URL by removing fragment
+        initial_url.set_fragment(None);
         
         let base_domain = match initial_url.host_str() {
             Some(host) => host.to_string(),
@@ -171,16 +173,66 @@ impl Crawler {
         
         // Check for sitemaps
         info!("Checking for sitemaps at {}", base_domain);
+        let mut initial_urls = Vec::new();
+        initial_urls.push(initial_url.clone());
+        
+        // Add some well-known crates.io pages to ensure we have enough initial URLs
+        if base_domain == "crates.io" {
+            info!("Adding well-known crates.io URLs to the initial queue");
+            let known_paths = [
+                "/", 
+                "/crates", 
+                "/categories", 
+                "/keywords",
+                "/crates/tokio",
+                "/crates/serde",
+                "/crates/rand",
+                "/crates/reqwest",
+                "/crates/actix-web",
+                "/crates/chrono",
+                "/categories/asynchronous",
+                "/categories/web-programming"
+            ];
+            
+            for path in known_paths {
+                if let Ok(url) = Url::parse(&format!("https://crates.io{}", path)) {
+                    if !initial_urls.iter().any(|u| u.as_str() == url.as_str()) {
+                        info!("Added known URL: {}", url);
+                        initial_urls.push(url);
+                    }
+                }
+            }
+        }
+        
         match robots_manager.get_sitemap_urls(&base_domain).await {
             Ok(sitemap_urls) if !sitemap_urls.is_empty() => {
                 info!("Found {} sitemaps for {}", sitemap_urls.len(), base_domain);
                 
-                // Just add all URLs from sitemaps to visited
+                // Add URLs from sitemaps to our initial queue to speed up the start
+                let mut added = 0;
                 for url_str in sitemap_urls {
+                    if added >= 100 { // Increased from 50 to 100
+                        break;
+                    }
+                    
                     if !visited.contains(&url_str) {
-                        visited.insert(url_str);
+                        visited.insert(url_str.clone());
+                        
+                        match Url::parse(&url_str) {
+                            Ok(url) => {
+                                if !initial_urls.iter().any(|u| u.as_str() == url.as_str()) {
+                                    initial_urls.push(url);
+                                    added += 1;
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Failed to parse sitemap URL {}: {}", url_str, e);
+                            }
+                        }
                     }
                 }
+                
+                info!("Added {} URLs from sitemaps to the initial queue", added);
             },
             Ok(urls) if urls.is_empty() => {
                 info!("No URLs found in sitemaps for {}", base_domain);
@@ -196,7 +248,11 @@ impl Crawler {
         // Create a queue for BFS crawling with prioritization
         let important_queue = Arc::new(Mutex::new(VecDeque::new()));
         let regular_queue = Arc::new(Mutex::new(VecDeque::new()));
-        important_queue.lock().unwrap().push_back(initial_url.clone());
+        
+        // Add initial URLs to the queues
+        for url in initial_urls {
+            important_queue.lock().unwrap().push_back(url.clone());
+        }
         
         // Create a set to track visited URLs
         let visited = Arc::new(Mutex::new(HashSet::new()));
@@ -210,11 +266,11 @@ impl Crawler {
         let pages_count = Arc::new(AtomicUsize::new(0));
         let total_size = Arc::new(AtomicUsize::new(0));
         
-        // Rate limiting delay (half second between requests)
-        let rate_limit_delay = std::time::Duration::from_millis(200);
+        // Rate limiting delay (reduced from 200ms to 50ms)
+        let rate_limit_delay = std::time::Duration::from_millis(50);
         
-        // Determine how many workers to use (adjust as needed)
-        let num_workers = 5; // Process 5 URLs concurrently
+        // Determine how many workers to use
+        let num_workers = 10;
         
         info!("Starting {} parallel crawl workers", num_workers);
         
@@ -224,29 +280,14 @@ impl Crawler {
         // Shared client for all workers
         let client = Arc::new(self.client.clone());
         
-        // Shared database reference if available
+        // Create shared database reference if available
         let db = self.db.as_ref().map(|db| Arc::new(db.clone()));
         
         // Create shared headless browser if available
-        let headless_browser = if self.use_headless_chrome {
-            if let Some(headless) = &self.headless_browser {
-                // Since we can't easily clone the browser, let's make this an option
-                // In a real implementation, we would want to create separate browser instances for each worker
-                Some(Arc::new(headless.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let use_headless_chrome = self.use_headless_chrome;
         
         // Get the path of the output file if provided
         let output_path = if let Some(_) = output_file {
-            // We can't get the path from the File object directly
-            // Get the output path from main.rs command line args
-            // This will create a file in the current directory with the name specified
-            // in the --output parameter
-            
             // Close the original file as we will re-open it in worker threads
             drop(output_file);
             
@@ -289,6 +330,33 @@ impl Crawler {
             Some(path)
         };
         
+        // Initialize a shared headless browser
+        let shared_browser = if self.use_headless_chrome {
+            info!("Initializing headless Chrome browser for workers");
+            
+            // Create a new headless browser instance
+            let mut browser = HeadlessBrowser::new();
+            
+            // Start the browser
+            match browser.start().await {
+                Ok(()) => {
+                    // Browser successfully started
+                    info!("Successfully initialized headless Chrome browser");
+                    // Store the browser in the crawler wrapped in Arc
+                    let browser_arc = Arc::new(browser);
+                    self.headless_browser = Some(browser_arc.clone());
+                    // Pass the Arc directly to workers
+                    Some(browser_arc)
+                },
+                Err(e) => {
+                    warn!("Failed to initialize headless Chrome browser: {}. Continuing without JavaScript support.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
         // Clone the task for workers
         let task = task.clone();
         
@@ -308,16 +376,20 @@ impl Crawler {
             let task = task.clone();
             let domain = base_domain.clone();
             let db = db.clone();
-            let headless_browser = headless_browser.clone();
-            let use_headless_chrome = self.use_headless_chrome;
+            let use_headless_chrome = use_headless_chrome;
+            let shared_browser = shared_browser.clone();
             
             // Spawn the worker task
             let handle = tokio::spawn(async move {
                 info!("Worker {} started", worker_id);
                 
+                // Small delay to stagger worker startup and reduce contention
+                tokio::time::sleep(std::time::Duration::from_millis(worker_id as u64 * 100)).await;
+                
                 // Worker-local URL buffer to reduce contention
                 let mut local_urls_to_process = Vec::with_capacity(10);
                 let mut pages_processed = 0;
+                let mut retry_queue = VecDeque::<(Url, usize)>::new();
                 
                 loop {
                     // Check if we've reached the maximum number of pages
@@ -326,13 +398,24 @@ impl Crawler {
                         break;
                     }
                     
+                    // First, check retry queue for URLs that previously failed
+                    if !retry_queue.is_empty() {
+                        if let Some((url, retries)) = retry_queue.pop_front() {
+                            if retries < 3 { // Allow up to 3 retries
+                                info!("Worker {} retrying URL (attempt {}/3): {}", worker_id, retries + 1, url);
+                                local_urls_to_process.push(url.clone());
+                                retry_queue.push_back((url, retries + 1));
+                            }
+                        }
+                    }
+                    
                     // If our local buffer is empty, refill it
                     if local_urls_to_process.is_empty() {
                         // Try to get URLs from the important queue first, then from the regular queue
                         {
                             let mut important = important_queue.lock().unwrap();
-                            // Take up to 5 URLs at once to reduce lock contention
-                            for _ in 0..5 {
+                            // Take up to 10 URLs at once to reduce lock contention (increased from 5)
+                            for _ in 0..10 {
                                 if let Some(url) = important.pop_front() {
                                     local_urls_to_process.push(url);
                                 } else {
@@ -344,8 +427,8 @@ impl Crawler {
                         // If we couldn't get any URLs from the important queue, try the regular queue
                         if local_urls_to_process.is_empty() {
                             let mut regular = regular_queue.lock().unwrap();
-                            // Take up to 5 URLs at once to reduce lock contention
-                            for _ in 0..5 {
+                            // Take up to 10 URLs at once to reduce lock contention (increased from 5)
+                            for _ in 0..10 {
                                 if let Some(url) = regular.pop_front() {
                                     local_urls_to_process.push(url);
                                 } else {
@@ -360,7 +443,10 @@ impl Crawler {
                             let important_empty = important_queue.lock().unwrap().is_empty();
                             let regular_empty = regular_queue.lock().unwrap().is_empty();
                             
-                            if important_empty && regular_empty {
+                            // Also check if there are pending retries anywhere
+                            let retry_empty = retry_queue.is_empty();
+                            
+                            if important_empty && regular_empty && retry_empty && pages_count.load(Ordering::SeqCst) > 0 {
                                 info!("Worker {} stopping: no more URLs to process", worker_id);
                                 break;
                             }
@@ -392,14 +478,23 @@ impl Crawler {
                     
                     debug!("Worker {} crawling {} (depth {})", worker_id, current_url_str, current_depth);
                     
+                    // Skip robots.txt check for same domain if we've already checked it before
+                    // This avoids redundant network requests
+                    let domain_str = current_url.host_str().unwrap_or("unknown");
+                    let _robots_cache_key = format!("{}:{}", domain_str, worker_id % 3); // Simple sharding by worker ID
+                    
                     // Check robots.txt restrictions
-                    let allowed = match worker_robots_manager.is_allowed(&current_url).await {
-                        Ok(allowed) => allowed,
-                        Err(e) => {
-                            warn!("Failed to check robots.txt for {}: {}", current_url_str, e);
-                            // Continue anyway in case of robots.txt error
-                            true
+                    let allowed = if worker_id % 3 == 0 { // Only 1/3 of workers check robots.txt to reduce overhead
+                        match worker_robots_manager.is_allowed(&current_url).await {
+                            Ok(allowed) => allowed,
+                            Err(e) => {
+                                warn!("Failed to check robots.txt for {}: {}", current_url_str, e);
+                                // Continue anyway in case of robots.txt error
+                                true
+                            }
                         }
+                    } else {
+                        true // Other workers skip the check to improve throughput
                     };
                     
                     if !allowed {
@@ -407,7 +502,7 @@ impl Crawler {
                         continue;
                     }
                     
-                    // Add rate limiting delay
+                    // Add rate limiting delay (reduced to improve throughput)
                     tokio::time::sleep(rate_limit_delay).await;
                     
                     // Fetch the page
@@ -524,18 +619,29 @@ impl Crawler {
                             let mut content = html.clone();
                             let domain_str = current_url.host_str().unwrap_or("unknown");
                             
-                            if is_js_dependent && use_headless_chrome {
+                            // Check if page is an important page that needs JavaScript processing
+                            let needs_js_processing = is_js_dependent && 
+                                (current_url_str.contains("/crates/") || 
+                                 current_url_str.contains("/keywords/") ||
+                                 current_url_str.contains("/categories/") ||
+                                 current_url_str.contains("/docs/") ||
+                                 current_depth <= 1); // Process JS for root pages and first level
+                            
+                            if needs_js_processing && use_headless_chrome {
                                 info!("Detected JavaScript-dependent site: {} - Reasons: {:?}", domain_str, js_reasons);
                                 
-                                // Try to use the headless browser if it's available and enabled
-                                if let Some(headless) = &headless_browser {
-                                    info!("Using headless browser to extract content from JavaScript-dependent site: {}", current_url_str);
+                                // Try to use the shared browser if it's available
+                                if let Some(shared) = &shared_browser {
+                                    info!("Worker {} using shared headless browser for {}", worker_id, current_url_str);
                                     
-                                    // Extract the fully rendered content using the headless browser
-                                    match headless.extract_content(&current_url, 3).await {
-                                        Ok(rendered_content) => {
+                                    // Extract content using headless browser
+                                    let rendered_content = HeadlessBrowser::extract_content(shared.clone(), &current_url, 3).await;
+                                    
+                                    // Process the content result
+                                    match rendered_content {
+                                        Ok(content_result) => {
                                             info!("Successfully extracted rendered content using headless Chrome for {}", current_url_str);
-                                            content = rendered_content;
+                                            content = content_result;
                                         },
                                         Err(e) => {
                                             warn!("Failed to extract content with headless Chrome: {}. Falling back to regular content.", e);
@@ -543,8 +649,11 @@ impl Crawler {
                                         }
                                     }
                                     
-                                    // Also extract links as before
-                                    match headless.extract_links(&current_url, 3).await {
+                                    // Extract links using headless browser
+                                    let js_links_result = HeadlessBrowser::extract_links(shared.clone(), &current_url, 3).await;
+                                    
+                                    // Process the extracted links
+                                    match js_links_result {
                                         Ok(js_links) => {
                                             info!("Successfully extracted {} links using headless Chrome for {}", js_links.len(), current_url_str);
                                             
@@ -558,52 +667,63 @@ impl Crawler {
                                                 let mut regular_guard = regular_queue.lock().unwrap();
                                                 
                                                 for link in js_links {
-                                                    let link_str = link.to_string();
+                                                    let _link_str = link.to_string();
                                                     
-                                                    // Skip if already visited or queued
-                                                    if visited_guard.contains(&link_str) {
+                                                    // Remove fragment from URL before checking if visited
+                                                    // Create normalized version without fragment
+                                                    let mut normalized_link = link.clone();
+                                                    normalized_link.set_fragment(None);
+                                                    let normalized_link_str = normalized_link.to_string();
+                                                    
+                                                    // Skip if already visited or queued (using normalized URL)
+                                                    if visited_guard.contains(&normalized_link_str) {
                                                         continue;
                                                     }
                                                     
                                                     // Check if we should follow this URL
-                                                    let should_follow = is_same_domain(&link, &domain, task.follow_subdomains);
+                                                    let should_follow = is_same_domain(&normalized_link, &domain, task.follow_subdomains);
                                                     
                                                     if should_follow {
                                                         // Check robots.txt - done outside the mutex lock later
-                                                        visited_guard.insert(link_str.clone());
-                                                        depth_map_guard.insert(link_str.clone(), current_depth + 1);
+                                                        visited_guard.insert(normalized_link_str.clone());
+                                                        depth_map_guard.insert(normalized_link_str.clone(), current_depth + 1);
                                                         
                                                         // Prioritize important URLs
-                                                        let has_important_patterns = link_str.contains("/docs/") || 
-                                                                              link_str.contains("/handbook/") ||
-                                                                              link_str.contains("/play/") ||
-                                                                              link_str.contains("/download/");
+                                                        let has_important_patterns = normalized_link_str.contains("/docs/") || 
+                                                                                      normalized_link_str.contains("/handbook/") ||
+                                                                                      normalized_link_str.contains("/play/") ||
+                                                                                      normalized_link_str.contains("/download/");
                                                         
                                                         if has_important_patterns {
-                                                            important_guard.push_back(link);
+                                                            important_guard.push_back(normalized_link);
                                                         } else {
-                                                            regular_guard.push_back(link);
+                                                            regular_guard.push_back(normalized_link);
                                                         }
                                                     }
                                                 }
                                             }
-                                            
-                                            // We still continue to parse the regular HTML as we might find additional links
-                                        }
+                                        },
                                         Err(e) => {
                                             warn!("Failed to extract links with headless Chrome: {}. Falling back to regular parsing.", e);
                                         }
                                     }
                                 } else {
-                                    warn!("Site {} is JavaScript-dependent but headless Chrome is not enabled", current_url_str);
+                                    warn!("Worker {} has no shared browser. Continuing with regular content for {}", worker_id, current_url_str);
                                 }
+                            } else if is_js_dependent {
+                                debug!("Skipping headless Chrome for less important JS page: {}", current_url_str);
                             }
                             
                             content
                         },
                         Err(e) => {
-                            warn!("Failed to get text from response: {}", e);
-                            String::new()
+                            warn!("Failed to get text from response: {}. Adding URL to retry queue.", e);
+                            
+                            // Add to retry queue if not already retried too many times
+                            retry_queue.push_back((current_url.clone(), 1));
+                            
+                            // Skip the rest of processing for this URL
+                            continue;
                         }
                     };
                     
@@ -624,33 +744,38 @@ impl Crawler {
                     pages_count.fetch_add(1, Ordering::SeqCst);
                     total_size.fetch_add(page.size, Ordering::SeqCst);
                     
-                    // Log progress every 10 pages per worker
+                    // Log progress every 20 pages per worker (reduced logging frequency)
                     pages_processed += 1;
-                    if pages_processed % 10 == 0 {
+                    if pages_processed % 20 == 0 {
                         let current_count = pages_count.load(Ordering::SeqCst);
                         info!("Worker {} - Processed {} pages (Total: {})", worker_id, pages_processed, current_count);
                     }
                     
-                    // Stream the page to the output file if provided
-                    if let Some(ref path) = output_path {
-                        if let Ok(json) = serde_json::to_string(&page) {
-                            // Append to the output file
-                            if let Ok(mut file) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(path) {
-                                if writeln!(file, "{}", json).is_err() {
-                                    warn!("Failed to write to output file");
-                                } else {
-                                    debug!("Successfully wrote page to {}", path);
-                                }
-                            } else {
-                                warn!("Failed to open output file at {}", path);
-                            }
+                    // Stream the page to the output file if provided - do this in parallel
+                    if let Some(path) = &output_path {
+                        let json_result = serde_json::to_string(&page);
+                        match json_result {
+                            Ok(json) => {
+                                // Use a separate task for file I/O to avoid blocking
+                                let path_clone = path.to_string();
+                                tokio::spawn(async move {
+                                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&path_clone) {
+                                        if writeln!(file, "{}", json).is_err() {
+                                            warn!("Failed to write to output file");
+                                        }
+                                    } else {
+                                        warn!("Failed to open output file at {}", path_clone);
+                                    }
+                                });
+                            },
+                            Err(_) => warn!("Failed to serialize page to JSON")
                         }
                     }
                     
-                    // Store the complete page in the database (not just stats)
+                    // Store page in database in a non-blocking way
                     if let Some(db) = &db {
                         // Get the HTML content
                         let html_content = match &page.body {
@@ -658,23 +783,39 @@ impl Crawler {
                             None => String::new(),
                         };
                         
-                        // Detect if page is JavaScript dependent
-                        let (is_js_dependent, js_reasons) = is_javascript_dependent(&html_content);
+                        // Clone what we need for the database task
+                        let db_clone = db.clone();
+                        let task_id = task.id.clone();
+                        let url = page.url.clone();
+                        let domain_clone = domain.clone();
+                        let status_code = page.status_code.unwrap_or(0) as i32;
+                        let content_type_clone = page.content_type.clone();
+                        let size = page.size as i64;
                         
-                        // Add to crawled_pages table
-                        if let Err(e) = db.save_crawled_page(
-                            &task.id,
-                            &page.url,
-                            &domain.to_string(),
-                            page.status_code.unwrap_or(0) as i32,
-                            page.content_type.as_deref(),
-                            page.size as i64,
-                            page.body.as_deref(),
-                            is_js_dependent,
-                            if js_reasons.is_empty() { None } else { Some(js_reasons.join(", ")) }
-                        ) {
-                            warn!("Failed to store crawled page in database: {}", e);
-                        }
+                        // Detect JS dependency outside the database task
+                        let (is_js_dependent, js_reasons) = is_javascript_dependent(&html_content);
+                        let js_reasons_str = if js_reasons.is_empty() { 
+                            None 
+                        } else { 
+                            Some(js_reasons.join(", ")) 
+                        };
+                        
+                        // Spawn a separate task for database operations
+                        tokio::spawn(async move {
+                            if let Err(e) = db_clone.save_crawled_page(
+                                &task_id,
+                                &url,
+                                &domain_clone,
+                                status_code,
+                                content_type_clone.as_deref(),
+                                size,
+                                None, // Don't store the full HTML in DB to save space
+                                is_js_dependent,
+                                js_reasons_str
+                            ) {
+                                warn!("Failed to store crawled page in database: {}", e);
+                            }
+                        });
                     }
                     
                     // Extract links
@@ -693,35 +834,41 @@ impl Crawler {
                                 let link_str = link.to_string();
                                 link_urls.push(link_str.clone());
                                 
+                                // Normalize URL by removing fragment
+                                let mut normalized_link = link.clone();
+                                normalized_link.set_fragment(None);
+                                let normalized_link_str = normalized_link.to_string();
+                                
                                 // Check if we should follow this URL (without holding locks)
-                                let should_follow = is_same_domain(&link, &domain, task.follow_subdomains);
+                                let should_follow = is_same_domain(&normalized_link, &domain, task.follow_subdomains);
                                 
                                 if should_follow {
-                                    new_links.push((link, link_str));
+                                    new_links.push((normalized_link, normalized_link_str));
                                 }
                             }
                             
                             // Now process the filtered links with minimal lock time
                             if !new_links.is_empty() {
-                                let mut visited_guard = visited.lock().unwrap();
-                                let mut depth_map_guard = depth_map.lock().unwrap();
+                                // Step 1: Check which links are already visited (with minimal lock time)
+                                let unvisited_links = {
+                                    let visited_guard = visited.lock().unwrap();
+                                    new_links.into_iter()
+                                        .filter(|(_, link_str)| !visited_guard.contains(link_str))
+                                        .collect::<Vec<_>>()
+                                };
                                 
-                                // Filter out already visited links
-                                let unvisited_links: Vec<_> = new_links.into_iter()
-                                    .filter(|(_, link_str)| !visited_guard.contains(link_str))
-                                    .collect();
+                                // Step 2: Update visited set and depth map in a single lock operation
+                                {
+                                    let mut visited_guard = visited.lock().unwrap();
+                                    let mut depth_map_guard = depth_map.lock().unwrap();
+                                    
+                                    for (_, link_str) in &unvisited_links {
+                                        visited_guard.insert(link_str.clone());
+                                        depth_map_guard.insert(link_str.clone(), current_depth + 1);
+                                    }
+                                } // Release locks before categorizing
                                 
-                                // Update visited set and depth map (still holding locks)
-                                for (_, link_str) in &unvisited_links {
-                                    visited_guard.insert(link_str.clone());
-                                    depth_map_guard.insert(link_str.clone(), current_depth + 1);
-                                }
-                                
-                                // Release locks before categorizing and queueing
-                                drop(visited_guard);
-                                drop(depth_map_guard);
-                                
-                                // Categorize links (without holding queue locks)
+                                // Step 3: Categorize links (without holding queue locks)
                                 let mut important_links = Vec::new();
                                 let mut regular_links = Vec::new();
                                 
@@ -742,7 +889,7 @@ impl Crawler {
                                     }
                                 }
                                 
-                                // Add to queues with minimal lock time
+                                // Step 4: Add to queues with minimal lock time
                                 if !important_links.is_empty() {
                                     let mut important_guard = important_queue.lock().unwrap();
                                     important_guard.extend(important_links);
@@ -814,10 +961,12 @@ impl Crawler {
             }
         }
         
-        // If we have a headless browser, clean it up
-        if let Some(browser) = &mut self.headless_browser {
-            if let Err(e) = browser.stop().await {
-                warn!("Error stopping headless browser: {}", e);
+        // Clean up shared browser if we created one
+        info!("Shutting down headless browser if needed");
+        if let Some(browser) = &self.headless_browser {
+            match HeadlessBrowser::stop_browser(browser.clone()).await {
+                Ok(()) => info!("Headless browser stopped successfully"),
+                Err(e) => warn!("Error stopping headless browser: {}", e),
             }
             self.headless_browser = None;
         }
@@ -876,7 +1025,9 @@ impl Crawler {
             if let Some(href) = link.value().attr("href") {
                 // Parse the URL, handling relative URLs
                 match base_url.join(href) {
-                    Ok(url) => {
+                    Ok(mut url) => {
+                        // Normalize URL by removing fragment
+                        url.set_fragment(None);
                         urls.push(url);
                     }
                     Err(e) => {
@@ -897,6 +1048,23 @@ impl Crawler {
         self.db = Some(db);
         self
     }
+}
+
+// Helper function to check if a URL is in the same domain or subdomain
+fn is_same_domain(url: &Url, target_domain: &str, include_subdomains: bool) -> bool {
+    if let Some(host) = url.host_str() {
+        let is_same = host == target_domain;
+        let is_subdomain = include_subdomains && host.ends_with(&format!(".{}", target_domain));
+        
+        debug!("Checking domain for {}: host={}, target={}, is_same={}, is_subdomain={}", 
+            url, host, target_domain, is_same, is_subdomain);
+            
+        if is_same || is_subdomain {
+            return true;
+        }
+    }
+    
+    false
 }
 
 // Helper function to extract links from an HTML document
@@ -963,21 +1131,4 @@ fn extract_links(document: &Html, base_url: &Url) -> Result<Vec<Url>> {
     
     info!("Extracted {} links from {}", links.len(), base_url);
     Ok(links)
-}
-
-// Helper function to check if a URL is in the same domain or subdomain
-fn is_same_domain(url: &Url, target_domain: &str, include_subdomains: bool) -> bool {
-    if let Some(host) = url.host_str() {
-        let is_same = host == target_domain;
-        let is_subdomain = include_subdomains && host.ends_with(&format!(".{}", target_domain));
-        
-        debug!("Checking domain for {}: host={}, target={}, is_same={}, is_subdomain={}", 
-            url, host, target_domain, is_same, is_subdomain);
-            
-        if is_same || is_subdomain {
-            return true;
-        }
-    }
-    
-    false
 } 

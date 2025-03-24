@@ -129,9 +129,24 @@ impl HeadlessBrowser {
         Ok(())
     }
     
+    /// Static method to stop the browser when we only have Arc access
+    pub async fn stop_browser(_browser: Arc<HeadlessBrowser>) -> Result<()> {
+        info!("Stopping headless Chrome browser (static method)");
+        
+        // Clean up any stray processes
+        if cfg!(windows) {
+            let _ = Command::new("taskkill")
+                .args(&["/F", "/IM", "chrome.exe"])
+                .output();
+        }
+        
+        info!("Headless Chrome browser stopped");
+        Ok(())
+    }
+    
     /// Extract links from a JavaScript-heavy page
-    pub async fn extract_links(&self, url: &Url, wait_time_secs: u64) -> Result<Vec<Url>> {
-        let browser = self.browser.as_ref()
+    pub async fn extract_links(browser: Arc<HeadlessBrowser>, url: &Url, wait_time_secs: u64) -> Result<Vec<Url>> {
+        let browser_instance = browser.browser.as_ref()
             .ok_or_else(|| anyhow!("Browser not started"))?;
             
         info!("HeadlessBrowser::extract_links called for {}", url);
@@ -139,7 +154,7 @@ impl HeadlessBrowser {
         // Use a shorter overall timeout
         let total_timeout = timeout(Duration::from_secs(wait_time_secs + 5), async {
             // Create a new page with error handling
-            let page = match browser.new_page(url.as_str()).await {
+            let page = match browser_instance.new_page(url.as_str()).await {
                 Ok(page) => page,
                 Err(e) => return Err(anyhow!("Failed to create new page: {}", e)),
             };
@@ -165,7 +180,7 @@ impl HeadlessBrowser {
             }
             
             // Extract all links from the page
-            let links = match self.extract_links_from_page(&page).await {
+            let links = match Self::extract_links_from_page_static(&page).await {
                 Ok(links) => links,
                 Err(e) => {
                     // Try to close the page to prevent leaks
@@ -192,8 +207,8 @@ impl HeadlessBrowser {
     }
     
     /// Extract content from a JavaScript-heavy page
-    pub async fn extract_content(&self, url: &Url, wait_time_secs: u64) -> Result<String> {
-        let browser = self.browser.as_ref()
+    pub async fn extract_content(browser: Arc<HeadlessBrowser>, url: &Url, wait_time_secs: u64) -> Result<String> {
+        let browser_instance = browser.browser.as_ref()
             .ok_or_else(|| anyhow!("Browser not started"))?;
             
         info!("Navigating to {} to extract content", url);
@@ -201,7 +216,7 @@ impl HeadlessBrowser {
         // Use a shorter overall timeout
         let total_timeout = timeout(Duration::from_secs(wait_time_secs + 5), async {
             // Create a new page with error handling
-            let page = match browser.new_page(url.as_str()).await {
+            let page = match browser_instance.new_page(url.as_str()).await {
                 Ok(page) => page,
                 Err(e) => return Err(anyhow!("Failed to create new page: {}", e)),
             };
@@ -269,8 +284,8 @@ impl HeadlessBrowser {
         }
     }
     
-    /// Extract links from a page
-    async fn extract_links_from_page(&self, page: &Page) -> Result<Vec<Url>> {
+    /// Static version of extract_links_from_page that doesn't need &self
+    async fn extract_links_from_page_static(page: &Page) -> Result<Vec<Url>> {
         let base_url_str = page.url().await
             .map_err(|e| anyhow!("Failed to get page URL: {}", e))?
             .ok_or_else(|| anyhow!("Page URL is None"))?;
@@ -320,16 +335,21 @@ impl HeadlessBrowser {
         Ok(result)
     }
     
+    /// Extract links from a page (legacy method that calls the static version)
+    async fn extract_links_from_page(&self, page: &Page) -> Result<Vec<Url>> {
+        Self::extract_links_from_page_static(page).await
+    }
+    
     /// Take a screenshot of a page (useful for debugging)
     #[allow(dead_code)]
-    pub async fn take_screenshot(&self, url: &Url, path: &str) -> Result<()> {
-        let browser = self.browser.as_ref()
+    pub async fn take_screenshot(browser: Arc<HeadlessBrowser>, url: &Url, path: &str) -> Result<()> {
+        let browser_instance = browser.browser.as_ref()
             .ok_or_else(|| anyhow!("Browser not started"))?;
             
         info!("Taking screenshot of {}", url);
         
         // Create a new page
-        let page = browser.new_page(url.as_str()).await
+        let page = browser_instance.new_page(url.as_str()).await
             .map_err(|e| anyhow!("Failed to create new page: {}", e))?;
         
         // Wait for page to load

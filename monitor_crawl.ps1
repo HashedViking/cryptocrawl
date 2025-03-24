@@ -54,10 +54,11 @@ $cmd = "cargo run --bin cryptocrawl-crawler -- crawl-crates --max-depth $MaxDept
 
 # Start the crawl process
 Write-Host "Starting crawl process..." -ForegroundColor Green
-$process = Start-Process -FilePath "powershell.exe" -ArgumentList "-Command $cmd" -PassThru -RedirectStandardOutput $logFile -WindowStyle Hidden
+$process = Start-Process -FilePath "powershell.exe" -ArgumentList "-Command $cmd" -PassThru -RedirectStandardOutput $logFile -NoNewWindow
 
 Write-Host "Monitoring crawl process (PID: $($process.Id))..." -ForegroundColor Yellow
 Write-Host "Press Ctrl+C to stop monitoring (crawl will continue in background)" -ForegroundColor Yellow
+Write-Host "Press 'Q' to quit monitoring or 'K' to kill the crawler process" -ForegroundColor Yellow
 Write-Host ""
 
 # Start time for elapsed calculation
@@ -85,20 +86,88 @@ while ($monitoring) {
             break
         }
         
+        # Check for key press to stop monitoring or kill process
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq 'Q') {
+                Write-Host "Quitting monitoring. Process will continue running in background." -ForegroundColor Yellow
+                $monitoring = $false
+                break
+            }
+            elseif ($key.Key -eq 'K') {
+                Write-Host "Killing crawler process..." -ForegroundColor Red
+                # Kill all child processes first
+                $childProcesses = Get-WmiObject Win32_Process -Filter "ParentProcessId = $($process.Id)"
+                foreach ($childProcess in $childProcesses) {
+                    Stop-Process -Id $childProcess.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+                # Then kill the main process
+                Stop-Process -Id $process.Id -Force
+                Write-Host "Crawler process terminated." -ForegroundColor Red
+                $monitoring = $false
+                break
+            }
+        }
+        
         $memoryMB = [math]::Round($procInfo.WorkingSet64 / 1MB, 2)
         $cpuPercent = [math]::Round(($procInfo.CPU / (Get-Date).Subtract($startTime).TotalSeconds) * 100, 2)
         
-        # Get crawl statistics from log
-        $logContent = Get-Content $logFile -Tail 20 -ErrorAction SilentlyContinue
+        # Get crawl statistics from log file - read more lines to catch earlier page counts
+        $logContent = Get-Content $logFile -Tail 500 -ErrorAction SilentlyContinue
         $pageCount = 0
         $dataSize = 0
         
-        foreach ($line in $logContent) {
-            if ($line -match "Crawled (\d+) pages so far") {
-                $pageCount = [int]$matches[1]
+        # Look for counts directly in the JSONL file if it exists
+        if (Test-Path $outJsonl) {
+            $jsonlCount = (Get-Content $outJsonl -ErrorAction SilentlyContinue).Count
+            if ($jsonlCount -gt 0) {
+                $pageCount = $jsonlCount
             }
-            elseif ($line -match "pages, (\d+) bytes total") {
-                $dataSize = [int]$matches[1]
+        }
+        
+        # If we couldn't get the count from the JSONL file, try the log
+        if ($pageCount -eq 0) {
+            foreach ($line in $logContent) {
+                # Match all possible log patterns for page count
+                if ($line -match "Worker \d+ - Processed \d+ pages \(Total: (\d+)\)") {
+                    $pageCount = [int]$matches[1]
+                }
+                elseif ($line -match "pages_count.fetch_add\(1, Ordering::SeqCst\)") {
+                    # Each occurrence of this pattern means a page was processed
+                    $pageCount += 1
+                }
+                elseif ($line -match "Crawled (\d+) pages") {
+                    $pageCount = [int]$matches[1]
+                }
+                elseif ($line -match "(\d+) pages, \d+ bytes total") {
+                    $pageCount = [int]$matches[1]
+                }
+                elseif ($line -match "Total: (\d+)") {
+                    $pageCount = [int]$matches[1]
+                }
+                elseif ($line -match "Pages crawled: (\d+)") {
+                    $pageCount = [int]$matches[1]
+                }
+                elseif ($line -match "Successfully wrote page to") {
+                    # Each time this message appears, a page was written
+                    $pageCount += 1
+                }
+                
+                # Match pattern for data size
+                if ($line -match "total_size.fetch_add\((\d+),") {
+                    $dataSize += [int]$matches[1]
+                }
+                elseif ($line -match "(\d+) bytes total") {
+                    $dataSize = [int]$matches[1]
+                }
+            }
+        }
+        
+        # Check the JSONL output file size as a fallback for data size
+        if ($dataSize -eq 0) {
+            if (Test-Path $outJsonl) {
+                $fileInfo = Get-Item $outJsonl
+                $dataSize = $fileInfo.Length
             }
         }
         
@@ -127,8 +196,8 @@ while ($monitoring) {
         Write-Host "Recent logs:" -ForegroundColor Cyan
         Get-Content $logFile -Tail 10 | ForEach-Object { Write-Host "  $_" }
         
-        # Wait before checking again
-        Start-Sleep -Seconds 5
+        # Small sleep to reduce CPU usage, but still be responsive to key presses
+        Start-Sleep -Milliseconds 500
     }
     catch {
         Write-Host "Error monitoring process: $($_.Exception.Message)" -ForegroundColor Red
@@ -164,19 +233,11 @@ if ($process.ExitCode -ne 0) {
     Write-Host "Crawl process exited with error code: $($process.ExitCode)" -ForegroundColor Red
 }
 
-# Offer to run analysis on the crawled data
-Write-Host "`nDo you want to import the crawled data into the database for analysis? (y/n)" -ForegroundColor Cyan
-$answer = Read-Host
-if ($answer -eq "y") {
-    Write-Host "Importing crawled data into database..." -ForegroundColor Yellow
-    $importCmd = ".\import_jsonl.ps1 -JsonlFile '$outJsonl'"
-    Invoke-Expression $importCmd
-    
-    Write-Host "`nDo you want to analyze the crawl metrics? (y/n)" -ForegroundColor Cyan
-    $answer = Read-Host
-    if ($answer -eq "y") {
-        Write-Host "Analyzing crawl metrics..." -ForegroundColor Yellow
-        $analyzeCmd = ".\analyze_metrics.ps1 -MetricsFile '$metricsFile'"
-        Invoke-Expression $analyzeCmd
-    }
-} 
+# Automatically run analysis on the crawled data
+Write-Host "`nAutomatically importing crawled data into database..." -ForegroundColor Yellow
+$importCmd = ".\import_jsonl.ps1 -JsonlFile '$outJsonl'"
+Invoke-Expression $importCmd
+
+Write-Host "`nAutomatically analyzing crawl metrics..." -ForegroundColor Yellow
+$analyzeCmd = ".\analyze_metrics.ps1 -MetricsFile '$metricsFile'"
+Invoke-Expression $analyzeCmd 
