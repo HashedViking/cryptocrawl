@@ -325,7 +325,7 @@ async fn main() -> Result<()> {
         
         Command::Crawl { url, max_depth, follow_subdomains, max_links } => {
             // Create crawler
-            let mut crawler = Crawler::default();
+            let crawler = Crawler::default();
             
             // Create a new task
             let task = models::Task {

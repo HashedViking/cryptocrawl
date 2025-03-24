@@ -3,7 +3,6 @@ use anyhow::{anyhow, Result, Context};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::fs;
-use serde_json;
 use log::info;
 
 /// Manages the database for the manager

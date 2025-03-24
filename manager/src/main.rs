@@ -13,6 +13,7 @@ use db::Database;
 use evaluator::Evaluator;
 use solana::SolanaIntegration;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use once_cell::sync::OnceCell;
 
 // Global config instance
@@ -173,7 +174,7 @@ fn init_db(args: &Args) -> Result<Database> {
 }
 
 /// Start the API server
-async fn start_server(db: Arc<Database>, evaluator: Arc<Evaluator>) -> Result<()> {
+async fn start_server(db: Arc<Mutex<Database>>, evaluator: Arc<Evaluator>) -> Result<()> {
     // Get config values
     let _config = CONFIG.get().expect("Config not initialized");
     
@@ -193,16 +194,15 @@ async fn start_server(db: Arc<Database>, evaluator: Arc<Evaluator>) -> Result<()
     
     // Start API server
     info!("Starting manager server on {}", addr);
-    let _server_handle = api::start_api_server(db, evaluator, solana, &addr)
+    api::start_api_server(db, evaluator, solana, &addr)
         .await
         .context("Failed to start API server")?;
     
-    // Return server handle
     Ok(())
 }
 
 /// Start the manager process
-async fn start_manager(_db: Arc<Database>, _evaluator: Arc<Evaluator>) -> Result<()> {
+async fn start_manager(_db: Arc<Mutex<Database>>, _evaluator: Arc<Evaluator>) -> Result<()> {
     // Implementation will be added later
     info!("Manager process started");
     Ok(())
@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
     
     // Connect to database
     let db = init_db(&args)?;
-    let db = Arc::new(db);
+    let db = Arc::new(Mutex::new(db));
     
     // Initialize evaluator
     let evaluator = init_evaluator().await;

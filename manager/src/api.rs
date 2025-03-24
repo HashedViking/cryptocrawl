@@ -118,14 +118,14 @@ pub struct ApiDocResponse {
 
 // API implementation
 pub async fn start_api_server(
-    db: Arc<Database>,
+    db: Arc<Mutex<Database>>,
     evaluator: Arc<Evaluator>,
     solana: SolanaIntegration,
     addr: &str,
 ) -> Result<(), anyhow::Error> {
     // Create shared state
     let state = Arc::new(AppState {
-        db: Arc::new(Mutex::new(db.as_ref().clone())),
+        db,
         evaluator: evaluator.clone(),
         solana: Arc::new(solana),
         running: Arc::new(AtomicBool::new(true)),

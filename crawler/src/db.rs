@@ -7,6 +7,9 @@ use uuid::Uuid;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Type alias for a wallet history entry
+type WalletHistoryEntry = (String, i64, u64, String, Option<String>);
+
 /// Database for storing tasks and crawl results
 pub struct Database {
     /// SQLite connection
@@ -379,7 +382,7 @@ impl Database {
     }
     
     /// Get wallet history entries
-    pub fn get_wallet_history(&self, limit: Option<usize>) -> Result<Vec<(String, i64, u64, String, Option<String>)>> {
+    pub fn get_wallet_history(&self, limit: Option<usize>) -> Result<Vec<WalletHistoryEntry>> {
         let limit_clause = match limit {
             Some(n) => format!("LIMIT {}", n),
             None => String::new(),

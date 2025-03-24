@@ -1,7 +1,14 @@
 {
     "rust-analyzer.checkOnSave.command": "clippy",
-    "rust-analyzer.cargo.features": ["all"],
     "rust-analyzer.procMacro.enable": true,
     "rust-analyzer.cargo.loadOutDirsFromCheck": true,
-    "rust-analyzer.diagnostics.enable": true
+    "rust-analyzer.diagnostics.enable": true,
+    "rust-analyzer.diagnostics.disabled": [
+        "dead-code",
+        "unused-variables"
+    ],
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "--allow=dead_code",
+        "--allow=unused_variables"
+    ]
 }
